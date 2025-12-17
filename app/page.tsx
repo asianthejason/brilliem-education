@@ -459,7 +459,7 @@ export default function HomePage() {
 
               <div className="md:justify-self-end">
                 <Link
-                  href="#get-started"
+                  href="/get-started"
                   className="inline-flex w-full items-center justify-center rounded-full bg-slate-900 px-6 py-3 text-sm font-semibold text-white hover:bg-slate-800 md:w-auto"
                 >
                   Start exploring Brilliem
