@@ -1,12 +1,13 @@
 import { auth, clerkClient } from "@clerk/nextjs/server";
 
 export async function POST(req: Request) {
-  const { userId } = auth();
+  const { userId } = await auth();
   if (!userId) return new Response("Unauthorized", { status: 401 });
 
   const body = await req.json();
+  const client = await clerkClient();
 
-  await clerkClient.users.updateUser(userId, {
+  await client.users.updateUser(userId, {
     firstName: body.firstName || undefined,
     lastName: body.lastName || undefined,
     unsafeMetadata: {
