@@ -1,65 +1,41 @@
 import { auth, clerkClient } from "@clerk/nextjs/server";
 import { stripe } from "@/lib/stripe";
 
-const priceForTier = (tier: string) => {
-  if (tier === "lessons") return process.env.STRIPE_PRICE_LESSONS;
-  if (tier === "lessons_ai") return process.env.STRIPE_PRICE_LESSONS_AI_TUTOR;
-  return null;
-};
-
 export async function POST(req: Request) {
   const { userId } = await auth();
   if (!userId) return new Response("Unauthorized", { status: 401 });
 
-  const { tier } = await req.json();
-  const price = priceForTier(tier);
-  if (!price) return new Response("Invalid tier", { status: 400 });
+  const { subscriptionId, tier } = (await req.json()) as {
+    subscriptionId?: string;
+    tier?: "free" | "lessons" | "lessons_ai";
+  };
+
+  if (!subscriptionId || !tier) {
+    return new Response("Missing subscriptionId or tier", { status: 400 });
+  }
+
+  // Optional sanity check: ensure subscription exists and is in a paid/activating state.
+  // If you rely on webhooks for final state, you can loosen this.
+  const sub = await stripe.subscriptions.retrieve(subscriptionId);
+  if (!sub) return new Response("Subscription not found", { status: 404 });
+
+  // After a successful first payment, Stripe will typically move to 'active' (or 'trialing').
+  // In some cases it can briefly remain 'incomplete' right after confirmCardPayment.
+  const okStatuses = new Set(["active", "trialing", "incomplete"]);
+  if (!okStatuses.has(sub.status)) {
+    return new Response(`Subscription status not valid: ${sub.status}`, { status: 400 });
+  }
 
   const client = await clerkClient();
   const user = await client.users.getUser(userId);
 
-  const existingCustomerId =
-    (user.privateMetadata?.stripeCustomerId as string | undefined) ?? null;
-
-  const customerId =
-    existingCustomerId ||
-    (
-      await stripe.customers.create({
-        email: user.emailAddresses?.[0]?.emailAddress,
-        name: `${user.firstName ?? ""} ${user.lastName ?? ""}`.trim() || undefined,
-        metadata: { clerkUserId: userId },
-      })
-    ).id;
-
-  if (!existingCustomerId) {
-    await client.users.updateUser(userId, {
-      privateMetadata: {
-        ...(user.privateMetadata || {}),
-        stripeCustomerId: customerId,
-      },
-    });
-  }
-
-  // Create an incomplete subscription + payment intent for Payment Element
-  const sub = await stripe.subscriptions.create({
-    customer: customerId,
-    items: [{ price }],
-    payment_behavior: "default_incomplete",
-    payment_settings: { save_default_payment_method: "on_subscription" },
-    expand: ["latest_invoice.payment_intent"],
-    metadata: { clerkUserId: userId, tier },
+  await client.users.updateUser(userId, {
+    unsafeMetadata: {
+      ...(user.unsafeMetadata as any),
+      tier,
+      stripeSubscriptionId: subscriptionId,
+    },
   });
 
-  const pi = sub.latest_invoice && (sub.latest_invoice as any).payment_intent;
-  const clientSecret = pi?.client_secret as string | undefined;
-
-  if (!clientSecret) {
-    return new Response("Missing payment intent client secret", { status: 500 });
-  }
-
-  return Response.json({
-    clientSecret,
-    subscriptionId: sub.id,
-    customerId,
-  });
+  return Response.json({ ok: true });
 }

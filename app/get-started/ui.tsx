@@ -111,6 +111,9 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   // Store payment method id across verify -> onboarding
   const [storedPaymentMethodId, setStoredPaymentMethodId] = useState<string | null>(null);
 
+  // When switching to onboarding mode after verify, we need to wait for localStorage to hydrate tier + PM.
+  const [hydrated, setHydrated] = useState(false);
+
   // Subscription intent state (created server-side after signup completes)
   const [clientSecret, setClientSecret] = useState<string | null>(null);
   const [subscriptionId, setSubscriptionId] = useState<string | null>(null);
@@ -226,8 +229,10 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
       localStorage.removeItem("brilliem_onboarding");
     } catch {
       // ignore
+    } finally {
+      setHydrated(true);
     }
-  }, [mode]);
+  }, [mode, hydrated, tier, storedPaymentMethodId]);
 
   async function saveProfile(desiredTier: Tier) {
     const res = await fetch("/api/onboarding", {
@@ -342,9 +347,8 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         // We do this on the next render in onboarding mode.
         sessionStorage.setItem(FINALIZE_FLAG, "1");
 
-        // Add a query param so the route definitely remounts/re-renders.
-        router.replace("/get-started?postVerify=1");
-        router.refresh();
+        // Hard navigate so the server definitely re-evaluates auth() and switches the page to onboarding mode.
+        window.location.assign("/get-started?postVerify=1");
         return;
       }
       setError("Verification incomplete. Please try again.");
@@ -404,6 +408,16 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
 
     const shouldFinalize = sessionStorage.getItem(FINALIZE_FLAG) === "1";
     if (!shouldFinalize) return;
+
+    // Wait until we have hydrated tier/paymentMethodId from localStorage (set in signup step).
+    if (!hydrated) return;
+
+    // If they picked a paid tier during signup, we expect a stored PaymentMethod.
+    if (tier !== "free" && !storedPaymentMethodId) {
+      sessionStorage.removeItem(FINALIZE_FLAG);
+      setError("We couldn't find your saved card details. Please re-enter your card and try again.");
+      return;
+    }
 
     sessionStorage.removeItem(FINALIZE_FLAG);
 
