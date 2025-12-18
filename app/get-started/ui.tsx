@@ -1,15 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useSignUp, useUser } from "@clerk/nextjs";
-import { loadStripe } from "@stripe/stripe-js";
-import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-stripe-js";
+import { loadStripe, type Stripe, type StripeElements } from "@stripe/stripe-js";
 
 type Mode = "signup" | "onboarding";
 type Tier = "free" | "lessons" | "lessons_ai";
-
-const stripePromise = loadStripe(process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY || "");
 
 const TIERS: Array<{
   id: Tier;
@@ -48,6 +45,7 @@ function Field({
   placeholder,
   type = "text",
   required = false,
+  disabled = false,
 }: {
   label: string;
   value: string;
@@ -55,6 +53,7 @@ function Field({
   placeholder?: string;
   type?: string;
   required?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <label className="grid gap-1 text-sm">
@@ -66,50 +65,20 @@ function Field({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-slate-400"
+        className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-slate-400 disabled:bg-slate-50"
         required={required}
+        disabled={disabled}
       />
     </label>
-  );
-}
-
-function PaymentBox({
-  clientSecret,
-}: {
-  clientSecret: string;
-}) {
-  return (
-    <Elements stripe={stripePromise} options={{ clientSecret }}>
-      <PaymentBoxInner />
-    </Elements>
-  );
-}
-
-function PaymentBoxInner() {
-  const stripe = useStripe();
-  const elements = useElements();
-
-  // This component only renders the element; confirm happens from parent.
-  return (
-    <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
-      <div className="text-sm font-semibold text-slate-900">Payment method</div>
-      <div className="mt-3">
-        <PaymentElement />
-      </div>
-      {!stripe || !elements ? (
-        <div className="mt-3 text-xs text-slate-500">Loading payment form…</div>
-      ) : null}
-    </div>
   );
 }
 
 export function GetStartedClient({ mode }: { mode: Mode }) {
   const router = useRouter();
   const { user } = useUser();
-
   const { isLoaded: signUpLoaded, signUp, setActive } = useSignUp();
 
-  // Required signup fields
+  // Required fields
   const [firstName, setFirstName] = useState(user?.firstName ?? "");
   const [lastName, setLastName] = useState(user?.lastName ?? "");
   const [email, setEmail] = useState(user?.primaryEmailAddress?.emailAddress ?? "");
@@ -124,19 +93,25 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
 
   const [tier, setTier] = useState<Tier>("free");
 
-  // Email verification step (signup only)
+  // Signup verify step
   const [signupStep, setSignupStep] = useState<"form" | "verify">("form");
   const [verifyCode, setVerifyCode] = useState("");
 
-  // Stripe Payment Element state (onboarding)
   const paid = useMemo(() => tier !== "free", [tier]);
+
+  // Stripe state
   const [clientSecret, setClientSecret] = useState<string | null>(null);
   const [subscriptionId, setSubscriptionId] = useState<string | null>(null);
+
+  const stripeRef = useRef<Stripe | null>(null);
+  const elementsRef = useRef<StripeElements | null>(null);
+  const paymentElRef = useRef<any>(null);
+  const mountRef = useRef<HTMLDivElement | null>(null);
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Pull saved fields from localStorage after signup -> onboarding redirect
+  // Keep optional fields across verify -> onboarding
   useEffect(() => {
     if (mode !== "onboarding") return;
     try {
@@ -151,8 +126,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
       if (typeof data.city === "string") setCity(data.city);
       if (typeof data.province === "string") setProvince(data.province);
       if (typeof data.country === "string") setCountry(data.country);
-      if (data.tier === "free" || data.tier === "lessons" || data.tier === "lessons_ai")
-        setTier(data.tier);
+      if (data.tier === "free" || data.tier === "lessons" || data.tier === "lessons_ai") setTier(data.tier);
 
       localStorage.removeItem("brilliem_onboarding");
     } catch {
@@ -175,11 +149,12 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         country,
       }),
     });
-    if (!res.ok) throw new Error("Failed to save profile");
+    if (!res.ok) throw new Error("Failed to save profile.");
   }
 
   async function ensureSubscriptionIntent() {
     if (!paid) return;
+
     if (clientSecret && subscriptionId) return;
 
     const res = await fetch("/api/stripe/subscription-intent", {
@@ -189,13 +164,61 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     });
 
     const data = (await res.json()) as { clientSecret?: string; subscriptionId?: string };
+
     if (!res.ok || !data.clientSecret || !data.subscriptionId) {
-      throw new Error("Failed to initialize payment");
+      throw new Error("Could not load payment form.");
     }
 
     setClientSecret(data.clientSecret);
     setSubscriptionId(data.subscriptionId);
   }
+
+  // Mount/unmount Stripe Payment Element when paid + clientSecret available
+  useEffect(() => {
+    async function mount() {
+      if (mode !== "onboarding") return;
+      if (!paid) return;
+      if (!clientSecret) return;
+      if (!mountRef.current) return;
+
+      // cleanup previous
+      try {
+        paymentElRef.current?.unmount?.();
+      } catch {}
+      paymentElRef.current = null;
+      elementsRef.current = null;
+
+      const pk = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY;
+      if (!pk) throw new Error("Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY");
+
+      const stripe = await loadStripe(pk);
+      if (!stripe) throw new Error("Stripe failed to load.");
+      stripeRef.current = stripe;
+
+      const elements = stripe.elements({ clientSecret });
+      elementsRef.current = elements;
+
+      const paymentElement = elements.create("payment");
+      paymentElement.mount(mountRef.current);
+      paymentElRef.current = paymentElement;
+    }
+
+    mount().catch((e: any) => setError(e?.message || "Could not initialize payment."));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, paid, clientSecret]);
+
+  // If user switches to free, remove payment UI
+  useEffect(() => {
+    if (!paid) {
+      setClientSecret(null);
+      setSubscriptionId(null);
+      try {
+        paymentElRef.current?.unmount?.();
+      } catch {}
+      paymentElRef.current = null;
+      elementsRef.current = null;
+    }
+  }, [paid]);
 
   async function doSignUp() {
     setError(null);
@@ -218,7 +241,6 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
 
       await signUp.prepareEmailAddressVerification({ strategy: "email_code" });
 
-      // Persist optional fields + tier across the verification redirect step
       localStorage.setItem(
         "brilliem_onboarding",
         JSON.stringify({
@@ -255,13 +277,10 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
 
       if (res.status === "complete") {
         await setActive({ session: res.createdSessionId });
-
-        // After signup completes, reload as onboarding (signed-in)
         router.replace("/get-started");
         router.refresh();
         return;
       }
-
       setError("Verification incomplete. Please try again.");
     } catch (err: any) {
       const msg =
@@ -274,73 +293,80 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     }
   }
 
-  async function finishFree() {
-    await saveProfile("free");
-    router.push("/dashboard");
-    router.refresh();
-  }
-
-  async function finishPaid() {
-    // Save profile fields immediately; tier will be finalized after Stripe says active
-    await saveProfile(tier);
+  async function confirmAndActivate() {
+    if (!paid) return;
 
     await ensureSubscriptionIntent();
 
-    // Confirm payment (must run inside Elements context, so we do a small trick)
-    // We’ll redirect the user after success by polling activate endpoint.
-    // Instead of complicated cross-component callbacks, we use a minimal inline confirm route below.
-    router.push(`/get-started?pay=1`);
+    const stripe = stripeRef.current;
+    const elements = elementsRef.current;
+    if (!stripe || !elements) throw new Error("Payment form not ready yet.");
+
+    const result = await stripe.confirmPayment({
+      elements,
+      confirmParams: { return_url: `${window.location.origin}/dashboard` },
+      redirect: "if_required",
+    });
+
+    if (result.error) {
+      throw new Error(result.error.message || "Payment failed.");
+    }
+
+    // After confirmation, activate tier if subscription is active
+    const res = await fetch("/api/stripe/activate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subscriptionId, tier }),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(`Payment received, but activation failed: ${txt}`);
+    }
   }
 
-  // If pay=1, confirm payment using the embedded element (requires clientSecret)
-  useEffect(() => {
-    async function maybeConfirm() {
-      if (mode !== "onboarding") return;
-      const url = new URL(window.location.href);
-      if (url.searchParams.get("pay") !== "1") return;
-      if (!paid) return;
-      if (!clientSecret || !subscriptionId) return;
-
-      // Let the user click the button again after returning
-      url.searchParams.delete("pay");
-      window.history.replaceState({}, "", url.toString());
-    }
-    maybeConfirm();
-  }, [mode, paid, clientSecret, subscriptionId]);
-
-  // Primary button handler (only one button on the right)
   async function onPrimaryClick() {
-    try {
-      setError(null);
+    setError(null);
 
+    try {
       if (mode === "signup") {
-        if (signupStep === "form") return await doSignUp();
-        return await doVerify();
+        if (signupStep === "form") {
+          await doSignUp();
+          return;
+        }
+        await doVerify();
+        return;
       }
 
-      // onboarding (signed in)
-      if (!paid) return await finishFree();
-
-      // Ensure payment intent exists so PaymentElement can be shown
-      await ensureSubscriptionIntent();
-
-      // Now confirm payment
+      // onboarding (signed-in)
       setBusy(true);
 
-      // Confirm payment via Stripe JS by reaching into the iframe-less element
-      const stripeJs = await stripePromise;
-      if (!stripeJs) throw new Error("Stripe failed to load.");
+      // Save the user's profile fields first
+      await saveProfile(tier);
 
-      // Use Elements manually with the existing clientSecret by mounting a hidden Elements instance? Nope:
-      // We’ll instead rely on the PaymentElement already mounted in the page.
-      // The simplest way is to confirm using a form-level submit inside the Elements tree.
-      // So: we trigger a custom event that the payment form listens to.
-      window.dispatchEvent(new CustomEvent("brilliem:confirm-payment"));
+      if (!paid) {
+        router.push("/dashboard");
+        router.refresh();
+        return;
+      }
+
+      await confirmAndActivate();
+      router.push("/dashboard");
+      router.refresh();
     } catch (e: any) {
       setError(e?.message || "Something went wrong.");
+    } finally {
       setBusy(false);
     }
   }
+
+  const primaryDisabled =
+    busy ||
+    !firstName ||
+    !lastName ||
+    !email ||
+    (mode === "signup" && signupStep === "form" && !password) ||
+    (mode === "signup" && signupStep === "verify" && !verifyCode);
 
   const primaryLabel =
     mode === "signup"
@@ -354,7 +380,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   return (
     <main className="mx-auto max-w-6xl px-4 py-14">
       <div className="grid gap-10 md:grid-cols-2">
-        {/* LEFT: Signup/Profile fields */}
+        {/* LEFT */}
         <div>
           <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700">
             <span className="h-2.5 w-2.5 rounded-full bg-gradient-to-r from-orange-500 to-pink-500" />
@@ -365,35 +391,25 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
             Create your Brilliem account
           </h1>
           <p className="mt-3 text-slate-600">
-            Choose a plan, fill in your details, and jump into your dashboard.
+            First name, last name, email, and password are required. The rest is optional.
           </p>
 
           <div className="mt-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-            <div className="text-sm font-semibold text-slate-900">Your details</div>
-            <p className="mt-1 text-sm text-slate-600">
-              First name, last name, email, and password are required.
-            </p>
-
-            <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <div className="grid gap-4 md:grid-cols-2">
               <Field label="First name" value={firstName} onChange={setFirstName} required />
               <Field label="Last name" value={lastName} onChange={setLastName} required />
             </div>
 
             <div className="mt-4 grid gap-4 md:grid-cols-2">
-              <Field
-                label="Email"
-                value={email}
-                onChange={setEmail}
-                type="email"
-                required
-              />
+              <Field label="Email" value={email} onChange={setEmail} type="email" required />
               <Field
                 label="Password"
                 value={password}
                 onChange={setPassword}
                 type="password"
-                required={mode === "signup"} // only needed during signup step
+                required={mode === "signup"}
                 placeholder={mode === "onboarding" ? "Already set" : "Create a password"}
+                disabled={mode === "onboarding"}
               />
             </div>
 
@@ -407,7 +423,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
                   required
                 />
                 <p className="mt-2 text-xs text-slate-500">
-                  Enter the code we emailed you to activate your account.
+                  Enter the code we emailed you.
                 </p>
               </div>
             )}
@@ -428,7 +444,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
           </div>
         </div>
 
-        {/* RIGHT: Plan cards + conditional payment + single button */}
+        {/* RIGHT */}
         <div>
           <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="text-sm font-semibold text-slate-900">Choose your plan</div>
@@ -444,17 +460,14 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
                     setTier(t.id);
                     setError(null);
 
-                    // Reset payment UI when changing tier
-                    setClientSecret(null);
-                    setSubscriptionId(null);
-
-                    // In onboarding mode, initialize payment form immediately when paid tier selected
                     if (mode === "onboarding" && t.id !== "free") {
                       try {
                         setBusy(true);
+                        setClientSecret(null);
+                        setSubscriptionId(null);
                         await ensureSubscriptionIntent();
-                      } catch {
-                        setError("Could not load payment form. Please try again.");
+                      } catch (e: any) {
+                        setError(e?.message || "Could not load payment form.");
                       } finally {
                         setBusy(false);
                       }
@@ -464,9 +477,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
                     tier === t.id ? "border-slate-900" : "border-slate-200 hover:border-slate-300"
                   }`}
                 >
-                  <div
-                    className={`pointer-events-none absolute -right-16 -top-16 h-44 w-44 rounded-full bg-gradient-to-br ${t.accent} opacity-15 blur-2xl`}
-                  />
+                  <div className={`pointer-events-none absolute -right-16 -top-16 h-44 w-44 rounded-full bg-gradient-to-br ${t.accent} opacity-15 blur-2xl`} />
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-base font-semibold text-slate-900">{t.name}</div>
@@ -483,19 +494,15 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
               ))}
             </div>
 
-            {/* Payment Element shown ONLY when paid tier selected AND onboarding */}
-            {mode === "onboarding" && paid && clientSecret && (
-              <ConfirmablePaymentSection
-                clientSecret={clientSecret}
-                subscriptionId={subscriptionId!}
-                tier={tier}
-                onDone={() => {
-                  router.push("/dashboard");
-                  router.refresh();
-                }}
-                onError={(msg) => setError(msg)}
-                setBusy={(v) => setBusy(v)}
-              />
+            {/* Embedded Stripe Payment Element */}
+            {mode === "onboarding" && paid && (
+              <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
+                <div className="text-sm font-semibold text-slate-900">Payment method</div>
+                <div className="mt-3" ref={mountRef} />
+                <div className="mt-2 text-xs text-slate-500">
+                  Your payment is processed securely by Stripe.
+                </div>
+              </div>
             )}
 
             {error && (
@@ -507,139 +514,14 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
             {/* Single button */}
             <button
               onClick={onPrimaryClick}
-              disabled={
-                busy ||
-                (mode === "signup" && (!firstName || !lastName || !email || (signupStep === "form" && !password))) ||
-                (mode === "signup" && signupStep === "verify" && !verifyCode)
-              }
+              disabled={primaryDisabled}
               className="mt-6 inline-flex w-full items-center justify-center rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
             >
               {busy ? "Please wait…" : primaryLabel}
             </button>
-
-            {mode === "onboarding" && paid && !clientSecret && (
-              <div className="mt-3 text-xs text-slate-500">
-                Select a paid plan to load the payment form.
-              </div>
-            )}
           </div>
         </div>
       </div>
     </main>
-  );
-}
-
-/**
- * This renders the payment element and listens for the custom confirm event
- * triggered by the single main button.
- */
-function ConfirmablePaymentSection({
-  clientSecret,
-  subscriptionId,
-  tier,
-  onDone,
-  onError,
-  setBusy,
-}: {
-  clientSecret: string;
-  subscriptionId: string;
-  tier: Tier;
-  onDone: () => void;
-  onError: (msg: string) => void;
-  setBusy: (v: boolean) => void;
-}) {
-  return (
-    <Elements stripe={stripePromise} options={{ clientSecret }}>
-      <ConfirmablePaymentInner
-        subscriptionId={subscriptionId}
-        tier={tier}
-        onDone={onDone}
-        onError={onError}
-        setBusy={setBusy}
-      />
-    </Elements>
-  );
-}
-
-function ConfirmablePaymentInner({
-  subscriptionId,
-  tier,
-  onDone,
-  onError,
-  setBusy,
-}: {
-  subscriptionId: string;
-  tier: Tier;
-  onDone: () => void;
-  onError: (msg: string) => void;
-  setBusy: (v: boolean) => void;
-}) {
-  const stripe = useStripe();
-  const elements = useElements();
-  const router = useRouter();
-
-  useEffect(() => {
-    async function handler() {
-      if (!stripe || !elements) return;
-
-      setBusy(true);
-      try {
-        const origin = window.location.origin;
-
-        const result = await stripe.confirmPayment({
-          elements,
-          confirmParams: {
-            return_url: `${origin}/dashboard`,
-          },
-          redirect: "if_required",
-        });
-
-        if (result.error) {
-          onError(result.error.message || "Payment failed.");
-          return;
-        }
-
-        // Activate tier only after subscription is active
-        const res = await fetch("/api/stripe/activate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ subscriptionId, tier }),
-        });
-
-        if (!res.ok) {
-          const txt = await res.text();
-          onError(`Payment received, but activation failed: ${txt}`);
-          return;
-        }
-
-        onDone();
-        router.refresh();
-      } catch (e: any) {
-        onError(e?.message || "Payment failed.");
-      } finally {
-        setBusy(false);
-      }
-    }
-
-    const listener = () => handler();
-    window.addEventListener("brilliem:confirm-payment", listener as any);
-    return () => window.removeEventListener("brilliem:confirm-payment", listener as any);
-  }, [stripe, elements, subscriptionId, tier, onDone, onError, setBusy, router]);
-
-  return <PaymentBox clientSecret={"unused"} />; // PaymentElement already mounted below
-}
-
-function PaymentBox({ clientSecret }: { clientSecret: string }) {
-  // clientSecret not used here (Elements already has it), but kept to match earlier structure
-  return (
-    <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
-      <div className="text-sm font-semibold text-slate-900">Payment method</div>
-      <div className="mt-3">
-        <PaymentElement />
-      </div>
-      <div className="mt-2 text-xs text-slate-500">
-        Your payment is processed securely by Stripe.
-      </div>
-    </div>
   );
 }
