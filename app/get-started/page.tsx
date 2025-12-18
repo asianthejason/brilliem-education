@@ -1,15 +1,14 @@
 import { auth } from "@clerk/nextjs/server";
-import { redirect } from "next/navigation";
 import { GetStartedClient } from "./ui";
 
-export default function GetStartedPage() {
-  const { userId } = auth();
+export default async function GetStartedPage() {
+  const { userId } = await auth();
 
-  // If they aren’t signed in yet, Clerk will handle signup in the embedded component
-  // but your onboarding + tiers should require being signed in.
+  // If they aren’t signed in yet, show the embedded signup.
   if (!userId) {
     return <GetStartedClient mode="signup" />;
   }
 
+  // If signed in, show onboarding + tier selection.
   return <GetStartedClient mode="onboarding" />;
 }
