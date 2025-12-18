@@ -99,19 +99,102 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
 
   const paid = useMemo(() => tier !== "free", [tier]);
 
-  // Stripe state
-  const [clientSecret, setClientSecret] = useState<string | null>(null);
-  const [subscriptionId, setSubscriptionId] = useState<string | null>(null);
-
+  // Stripe: card element mounted for paid tiers (signup + onboarding)
+  const cardMountRef = useRef<HTMLDivElement | null>(null);
   const stripeRef = useRef<Stripe | null>(null);
   const elementsRef = useRef<StripeElements | null>(null);
-  const paymentElRef = useRef<any>(null);
-  const mountRef = useRef<HTMLDivElement | null>(null);
+  const cardRef = useRef<any>(null);
+  const [cardReady, setCardReady] = useState(false);
+
+  // Store payment method id across verify -> onboarding
+  const [storedPaymentMethodId, setStoredPaymentMethodId] = useState<string | null>(null);
+
+  // Subscription intent state (created server-side after signup completes)
+  const [clientSecret, setClientSecret] = useState<string | null>(null);
+  const [subscriptionId, setSubscriptionId] = useState<string | null>(null);
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Keep optional fields across verify -> onboarding
+  async function ensureStripeAndCardMounted() {
+    if (!paid) return;
+    if (!cardMountRef.current) return;
+
+    // Clean any previous (safe even if none)
+    try {
+      cardRef.current?.unmount?.();
+    } catch {
+      // ignore
+    }
+    cardRef.current = null;
+    setCardReady(false);
+
+    const pk = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY;
+    if (!pk) throw new Error("Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY");
+
+    const stripe = await loadStripe(pk);
+    if (!stripe) throw new Error("Stripe failed to load");
+
+    stripeRef.current = stripe;
+    const elements = stripe.elements(); // Card Element doesn't require clientSecret
+    elementsRef.current = elements;
+
+    const card = elements.create("card", {
+      style: {
+        base: {
+          fontSize: "16px",
+        },
+      },
+    });
+
+    card.mount(cardMountRef.current);
+    cardRef.current = card;
+    setCardReady(true);
+  }
+
+  async function createPaymentMethodId() {
+    const stripe = stripeRef.current;
+    const card = cardRef.current;
+
+    if (!stripe || !card) throw new Error("Payment field not ready yet.");
+
+    const pm = await stripe.createPaymentMethod({
+      type: "card",
+      card,
+      billing_details: {
+        name: `${firstName} ${lastName}`.trim(),
+        email,
+      },
+    });
+
+    if (pm.error) throw new Error(pm.error.message || "Card error.");
+    const id = pm.paymentMethod?.id;
+    if (!id) throw new Error("Could not create payment method.");
+    return id;
+  }
+
+  // Mount/unmount the credit card field whenever tier changes (both modes)
+  useEffect(() => {
+    setError(null);
+
+    if (!paid) {
+      try {
+        cardRef.current?.unmount?.();
+      } catch {
+        // ignore
+      }
+      cardRef.current = null;
+      setCardReady(false);
+      return;
+    }
+
+    ensureStripeAndCardMounted().catch((e: any) =>
+      setError(e?.message || "Could not load card field.")
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tier, paid]);
+
+  // Keep optional fields (+ tier + paymentMethodId) across verify -> onboarding
   useEffect(() => {
     if (mode !== "onboarding") return;
     try {
@@ -126,7 +209,9 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
       if (typeof data.city === "string") setCity(data.city);
       if (typeof data.province === "string") setProvince(data.province);
       if (typeof data.country === "string") setCountry(data.country);
-      if (data.tier === "free" || data.tier === "lessons" || data.tier === "lessons_ai") setTier(data.tier);
+      if (data.tier === "free" || data.tier === "lessons" || data.tier === "lessons_ai")
+        setTier(data.tier);
+      if (typeof data.paymentMethodId === "string") setStoredPaymentMethodId(data.paymentMethodId);
 
       localStorage.removeItem("brilliem_onboarding");
     } catch {
@@ -155,6 +240,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   async function ensureSubscriptionIntent() {
     if (!paid) return;
 
+    // If we already have one for current flow, reuse it
     if (clientSecret && subscriptionId) return;
 
     const res = await fetch("/api/stripe/subscription-intent", {
@@ -166,59 +252,12 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     const data = (await res.json()) as { clientSecret?: string; subscriptionId?: string };
 
     if (!res.ok || !data.clientSecret || !data.subscriptionId) {
-      throw new Error("Could not load payment form.");
+      throw new Error("Could not initialize subscription.");
     }
 
     setClientSecret(data.clientSecret);
     setSubscriptionId(data.subscriptionId);
   }
-
-  // Mount/unmount Stripe Payment Element when paid + clientSecret available
-  useEffect(() => {
-    async function mount() {
-      if (mode !== "onboarding") return;
-      if (!paid) return;
-      if (!clientSecret) return;
-      if (!mountRef.current) return;
-
-      // cleanup previous
-      try {
-        paymentElRef.current?.unmount?.();
-      } catch {}
-      paymentElRef.current = null;
-      elementsRef.current = null;
-
-      const pk = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY;
-      if (!pk) throw new Error("Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY");
-
-      const stripe = await loadStripe(pk);
-      if (!stripe) throw new Error("Stripe failed to load.");
-      stripeRef.current = stripe;
-
-      const elements = stripe.elements({ clientSecret });
-      elementsRef.current = elements;
-
-      const paymentElement = elements.create("payment");
-      paymentElement.mount(mountRef.current);
-      paymentElRef.current = paymentElement;
-    }
-
-    mount().catch((e: any) => setError(e?.message || "Could not initialize payment."));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, paid, clientSecret]);
-
-  // If user switches to free, remove payment UI
-  useEffect(() => {
-    if (!paid) {
-      setClientSecret(null);
-      setSubscriptionId(null);
-      try {
-        paymentElRef.current?.unmount?.();
-      } catch {}
-      paymentElRef.current = null;
-      elementsRef.current = null;
-    }
-  }, [paid]);
 
   async function doSignUp() {
     setError(null);
@@ -232,6 +271,14 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
 
     setBusy(true);
     try {
+      // If paid plan, require card details now and store PaymentMethod ID
+      let paymentMethodId: string | null = null;
+      if (paid) {
+        if (!cardReady) throw new Error("Please wait for the card field to load.");
+        paymentMethodId = await createPaymentMethodId();
+        setStoredPaymentMethodId(paymentMethodId);
+      }
+
       await signUp.create({
         firstName,
         lastName,
@@ -241,6 +288,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
 
       await signUp.prepareEmailAddressVerification({ strategy: "email_code" });
 
+      // Store everything needed for the onboarding step after verification
       localStorage.setItem(
         "brilliem_onboarding",
         JSON.stringify({
@@ -252,6 +300,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
           province,
           country,
           tier,
+          paymentMethodId,
         })
       );
 
@@ -260,6 +309,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
       const msg =
         err?.errors?.[0]?.longMessage ||
         err?.errors?.[0]?.message ||
+        err?.message ||
         "Could not create account.";
       setError(msg);
     } finally {
@@ -293,26 +343,34 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     }
   }
 
-  async function confirmAndActivate() {
+  async function confirmAndActivatePaidPlan() {
     if (!paid) return;
 
+    // Ensure server-side subscription exists (returns PaymentIntent client secret)
     await ensureSubscriptionIntent();
 
     const stripe = stripeRef.current;
-    const elements = elementsRef.current;
-    if (!stripe || !elements) throw new Error("Payment form not ready yet.");
+    if (!stripe) throw new Error("Stripe not ready yet.");
 
-    const result = await stripe.confirmPayment({
-      elements,
-      confirmParams: { return_url: `${window.location.origin}/dashboard` },
-      redirect: "if_required",
-    });
-
-    if (result.error) {
-      throw new Error(result.error.message || "Payment failed.");
+    // Use stored payment method if we already created it during signup,
+    // otherwise create it from the card field now.
+    let pmId = storedPaymentMethodId;
+    if (!pmId) {
+      if (!cardReady) throw new Error("Please enter your card details.");
+      pmId = await createPaymentMethodId();
+      setStoredPaymentMethodId(pmId);
     }
 
-    // After confirmation, activate tier if subscription is active
+    if (!clientSecret || !subscriptionId) throw new Error("Missing payment info. Please try again.");
+
+    // Pay the first invoice for the subscription
+    const result = await stripe.confirmCardPayment(clientSecret, {
+      payment_method: pmId,
+    });
+
+    if (result.error) throw new Error(result.error.message || "Payment failed.");
+
+    // After payment confirmation, activate tier in Clerk (your existing endpoint)
     const res = await fetch("/api/stripe/activate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -341,7 +399,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
       // onboarding (signed-in)
       setBusy(true);
 
-      // Save the user's profile fields first
+      // Save profile fields first
       await saveProfile(tier);
 
       if (!paid) {
@@ -350,7 +408,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         return;
       }
 
-      await confirmAndActivate();
+      await confirmAndActivatePaidPlan();
       router.push("/dashboard");
       router.refresh();
     } catch (e: any) {
@@ -366,7 +424,8 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     !lastName ||
     !email ||
     (mode === "signup" && signupStep === "form" && !password) ||
-    (mode === "signup" && signupStep === "verify" && !verifyCode);
+    (mode === "signup" && signupStep === "verify" && !verifyCode) ||
+    (paid && !cardReady);
 
   const primaryLabel =
     mode === "signup"
@@ -422,20 +481,28 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
                   placeholder="Code from your email"
                   required
                 />
-                <p className="mt-2 text-xs text-slate-500">
-                  Enter the code we emailed you.
-                </p>
+                <p className="mt-2 text-xs text-slate-500">Enter the code we emailed you.</p>
               </div>
             )}
 
             <div className="mt-6 grid gap-4 md:grid-cols-2">
-              <Field label="Grade level (optional)" value={gradeLevel} onChange={setGradeLevel} placeholder="e.g., Grade 7" />
+              <Field
+                label="Grade level (optional)"
+                value={gradeLevel}
+                onChange={setGradeLevel}
+                placeholder="e.g., Grade 7"
+              />
               <Field label="School name (optional)" value={schoolName} onChange={setSchoolName} />
             </div>
 
             <div className="mt-4 grid gap-4 md:grid-cols-2">
               <Field label="City/Town (optional)" value={city} onChange={setCity} />
-              <Field label="Province (optional)" value={province} onChange={setProvince} placeholder="e.g., AB" />
+              <Field
+                label="Province (optional)"
+                value={province}
+                onChange={setProvince}
+                placeholder="e.g., AB"
+              />
             </div>
 
             <div className="mt-4">
@@ -449,35 +516,27 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
           <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="text-sm font-semibold text-slate-900">Choose your plan</div>
             <div className="mt-1 text-sm text-slate-600">
-              Payment appears below only for paid plans.
+              If you choose a paid plan, a credit card field will appear below.
             </div>
 
             <div className="mt-5 grid gap-4">
               {TIERS.map((t) => (
                 <button
                   key={t.id}
-                  onClick={async () => {
+                  onClick={() => {
                     setTier(t.id);
                     setError(null);
-
-                    if (mode === "onboarding" && t.id !== "free") {
-                      try {
-                        setBusy(true);
-                        setClientSecret(null);
-                        setSubscriptionId(null);
-                        await ensureSubscriptionIntent();
-                      } catch (e: any) {
-                        setError(e?.message || "Could not load payment form.");
-                      } finally {
-                        setBusy(false);
-                      }
-                    }
+                    // Reset any in-progress subscription intent when switching plans
+                    setClientSecret(null);
+                    setSubscriptionId(null);
                   }}
                   className={`relative overflow-hidden rounded-2xl border p-5 text-left shadow-sm transition ${
                     tier === t.id ? "border-slate-900" : "border-slate-200 hover:border-slate-300"
                   }`}
                 >
-                  <div className={`pointer-events-none absolute -right-16 -top-16 h-44 w-44 rounded-full bg-gradient-to-br ${t.accent} opacity-15 blur-2xl`} />
+                  <div
+                    className={`pointer-events-none absolute -right-16 -top-16 h-44 w-44 rounded-full bg-gradient-to-br ${t.accent} opacity-15 blur-2xl`}
+                  />
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-base font-semibold text-slate-900">{t.name}</div>
@@ -494,13 +553,15 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
               ))}
             </div>
 
-            {/* Embedded Stripe Payment Element */}
-            {mode === "onboarding" && paid && (
+            {/* Stripe credit card field: shows for ANY paid tier (signup + onboarding) */}
+            {paid && (
               <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
-                <div className="text-sm font-semibold text-slate-900">Payment method</div>
-                <div className="mt-3" ref={mountRef} />
+                <div className="text-sm font-semibold text-slate-900">Credit card</div>
+                <div className="mt-3 rounded-xl border border-slate-200 bg-white p-3">
+                  <div ref={cardMountRef} />
+                </div>
                 <div className="mt-2 text-xs text-slate-500">
-                  Your payment is processed securely by Stripe.
+                  Your card is processed securely by Stripe.
                 </div>
               </div>
             )}
