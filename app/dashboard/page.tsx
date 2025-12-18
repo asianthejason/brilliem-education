@@ -1,7 +1,8 @@
 import { auth, clerkClient } from "@clerk/nextjs/server";
 
 export default async function DashboardPage() {
-  const { userId } = auth();
+  const { userId } = await auth();
+
   const user = await clerkClient.users.getUser(userId!);
 
   const grade = (user.unsafeMetadata?.gradeLevel as string) || "Not set yet";

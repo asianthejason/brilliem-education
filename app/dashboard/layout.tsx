@@ -10,7 +10,8 @@ const tabs = [
 ];
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const { userId } = auth();
+  const { userId } = await auth();
+
   if (!userId) redirect("/");
 
   return (

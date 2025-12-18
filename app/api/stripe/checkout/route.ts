@@ -8,16 +8,19 @@ const priceForTier = (tier: string) => {
 };
 
 export async function POST(req: Request) {
-  const { userId } = auth();
+  const { userId } = await auth();
   if (!userId) return new Response("Unauthorized", { status: 401 });
 
   const { tier } = await req.json();
   const price = priceForTier(tier);
   if (!price) return new Response("Invalid tier", { status: 400 });
 
-  const user = await clerkClient.users.getUser(userId);
+  const origin = process.env.NEXT_PUBLIC_APP_URL;
+  if (!origin) return new Response("Missing NEXT_PUBLIC_APP_URL", { status: 500 });
 
-  // Reuse customer if already created
+  const client = await clerkClient();
+  const user = await client.users.getUser(userId);
+
   const existingCustomerId =
     (user.privateMetadata?.stripeCustomerId as string | undefined) ?? null;
 
@@ -32,13 +35,13 @@ export async function POST(req: Request) {
     ).id;
 
   if (!existingCustomerId) {
-    await clerkClient.users.updateUser(userId, {
-      privateMetadata: { ...(user.privateMetadata || {}), stripeCustomerId: customerId },
+    await client.users.updateUser(userId, {
+      privateMetadata: {
+        ...(user.privateMetadata || {}),
+        stripeCustomerId: customerId,
+      },
     });
   }
-
-  const origin = process.env.NEXT_PUBLIC_APP_URL;
-  if (!origin) return new Response("Missing NEXT_PUBLIC_APP_URL", { status: 500 });
 
   const session = await stripe.checkout.sessions.create({
     mode: "subscription",

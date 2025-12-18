@@ -17,16 +17,14 @@ export default async function BillingSuccessPage({
   const userId = session.client_reference_id;
   if (!userId) redirect("/dashboard");
 
-  // Determine tier from line item price
   const priceId = session.line_items?.data?.[0]?.price?.id;
   const tier =
-    priceId === process.env.STRIPE_PRICE_LESSONS_AI_TUTOR
-      ? "lessons_ai"
-      : "lessons";
+    priceId === process.env.STRIPE_PRICE_LESSONS_AI_TUTOR ? "lessons_ai" : "lessons";
 
-  const user = await clerkClient.users.getUser(userId);
+  const client = await clerkClient();
+  const user = await client.users.getUser(userId);
 
-  await clerkClient.users.updateUser(userId, {
+  await client.users.updateUser(userId, {
     unsafeMetadata: { ...(user.unsafeMetadata || {}), tier },
   });
 
