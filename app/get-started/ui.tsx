@@ -3,6 +3,8 @@
 import { useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { SignUp, useUser } from "@clerk/nextjs";
+import { useSignUp } from "@clerk/nextjs";
+
 
 type Mode = "signup" | "onboarding";
 type Tier = "free" | "lessons" | "lessons_ai";
@@ -80,6 +82,68 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
 
   const paid = useMemo(() => tier !== "free", [tier]);
   const [loading, setLoading] = useState(false);
+const { isLoaded: signUpLoaded, signUp, setActive } = useSignUp();
+const [signupEmail, setSignupEmail] = useState("");
+const [signupPassword, setSignupPassword] = useState("");
+const [signupFirst, setSignupFirst] = useState("");
+const [signupLast, setSignupLast] = useState("");
+const [signupError, setSignupError] = useState<string | null>(null);
+const [signupStep, setSignupStep] = useState<"form" | "verify">("form");
+const [verifyCode, setVerifyCode] = useState("");
+const [signupSubmitting, setSignupSubmitting] = useState(false);
+
+async function doSignUp(e: React.FormEvent) {
+  e.preventDefault();
+  setSignupError(null);
+  if (!signUpLoaded || !signUp) return;
+
+  setSignupSubmitting(true);
+  try {
+    await signUp.create({
+      emailAddress: signupEmail,
+      password: signupPassword,
+      firstName: signupFirst,
+      lastName: signupLast,
+    });
+
+    await signUp.prepareEmailAddressVerification({ strategy: "email_code" });
+    setSignupStep("verify");
+  } catch (err: any) {
+    const msg =
+      err?.errors?.[0]?.longMessage ||
+      err?.errors?.[0]?.message ||
+      "Could not create account.";
+    setSignupError(msg);
+  } finally {
+    setSignupSubmitting(false);
+  }
+}
+
+async function doVerify(e: React.FormEvent) {
+  e.preventDefault();
+  setSignupError(null);
+  if (!signUpLoaded || !signUp) return;
+
+  setSignupSubmitting(true);
+  try {
+    const res = await signUp.attemptEmailAddressVerification({ code: verifyCode });
+    if (res.status === "complete") {
+      await setActive({ session: res.createdSessionId });
+      router.replace("/get-started");
+      router.refresh();
+      return;
+    }
+    setSignupError("Verification incomplete. Please try again.");
+  } catch (err: any) {
+    const msg =
+      err?.errors?.[0]?.longMessage ||
+      err?.errors?.[0]?.message ||
+      "Invalid verification code.";
+    setSignupError(msg);
+  } finally {
+    setSignupSubmitting(false);
+  }
+}
 
   async function saveProfileAndTier() {
     const res = await fetch("/api/onboarding", {
@@ -150,16 +214,104 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
           )}
 
           {mode === "signup" && (
-            <div className="mt-6 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-              <SignUp
-                routing="hash"
-                appearance={{ elements: { card: "shadow-none border-none p-0" } }}
-              />
-              <div className="mt-4 text-xs text-slate-500">
-                After you sign up, you’ll choose your plan and finish setup.
-              </div>
-            </div>
-          )}
+  <div className="mt-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+    <div className="text-sm font-semibold text-slate-900">Create your account</div>
+    <p className="mt-1 text-sm text-slate-600">
+      Sign up with email and password to continue.
+    </p>
+
+    {signupStep === "form" ? (
+      <form onSubmit={doSignUp} className="mt-4 grid gap-3">
+        <div className="grid gap-3 md:grid-cols-2">
+          <label className="grid gap-1 text-sm">
+            <span className="font-semibold text-slate-800">First name</span>
+            <input
+              value={signupFirst}
+              onChange={(e) => setSignupFirst(e.target.value)}
+              className="rounded-xl border border-slate-200 px-3 py-2 outline-none focus:border-slate-400"
+              required
+            />
+          </label>
+          <label className="grid gap-1 text-sm">
+            <span className="font-semibold text-slate-800">Last name</span>
+            <input
+              value={signupLast}
+              onChange={(e) => setSignupLast(e.target.value)}
+              className="rounded-xl border border-slate-200 px-3 py-2 outline-none focus:border-slate-400"
+              required
+            />
+          </label>
+        </div>
+
+        <label className="grid gap-1 text-sm">
+          <span className="font-semibold text-slate-800">Email</span>
+          <input
+            type="email"
+            value={signupEmail}
+            onChange={(e) => setSignupEmail(e.target.value)}
+            className="rounded-xl border border-slate-200 px-3 py-2 outline-none focus:border-slate-400"
+            required
+          />
+        </label>
+
+        <label className="grid gap-1 text-sm">
+          <span className="font-semibold text-slate-800">Password</span>
+          <input
+            type="password"
+            value={signupPassword}
+            onChange={(e) => setSignupPassword(e.target.value)}
+            className="rounded-xl border border-slate-200 px-3 py-2 outline-none focus:border-slate-400"
+            required
+          />
+        </label>
+
+        {signupError && (
+          <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+            {signupError}
+          </div>
+        )}
+
+        <button
+          disabled={!signUpLoaded || signupSubmitting}
+          className="mt-2 inline-flex w-full items-center justify-center rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
+        >
+          {signupSubmitting ? "Creating..." : "Create account"}
+        </button>
+
+        <div className="text-xs text-slate-500">
+          You’ll verify your email next.
+        </div>
+      </form>
+    ) : (
+      <form onSubmit={doVerify} className="mt-4 grid gap-3">
+        <label className="grid gap-1 text-sm">
+          <span className="font-semibold text-slate-800">Verification code</span>
+          <input
+            value={verifyCode}
+            onChange={(e) => setVerifyCode(e.target.value)}
+            className="rounded-xl border border-slate-200 px-3 py-2 outline-none focus:border-slate-400"
+            placeholder="Enter the code from your email"
+            required
+          />
+        </label>
+
+        {signupError && (
+          <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+            {signupError}
+          </div>
+        )}
+
+        <button
+          disabled={!signUpLoaded || signupSubmitting}
+          className="mt-2 inline-flex w-full items-center justify-center rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
+        >
+          {signupSubmitting ? "Verifying..." : "Verify & continue"}
+        </button>
+      </form>
+    )}
+  </div>
+)}
+
 
           {mode === "onboarding" && (
             <div className="mt-6 grid gap-4 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
