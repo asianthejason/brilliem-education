@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useSignIn } from "@clerk/nextjs";
+import Link from "next/link";
 
 export function AuthModal({
   open,
@@ -138,7 +139,11 @@ export function AuthModal({
 
         {/* Removed: Google sign-in + removed: Sign up option */}
         <p className="mt-4 text-center text-xs text-slate-500">
-          Need an account? Use the <span className="font-semibold">Get started</span> button.
+          Need an account?{" "}
+  <Link href="/get-started" className="font-semibold text-slate-800 underline">
+    Get started
+  </Link>
+  .
         </p>
       </div>
     </div>

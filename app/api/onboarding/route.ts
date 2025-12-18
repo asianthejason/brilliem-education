@@ -11,11 +11,13 @@ export async function POST(req: Request) {
     firstName: body.firstName || undefined,
     lastName: body.lastName || undefined,
     unsafeMetadata: {
-      tier: body.tier,
+      ...(body.keepExisting ? undefined : {}),
+      tier: body.tier, // "free" | "lessons" | "lessons_ai"
+      gradeLevel: body.gradeLevel || "",
+      schoolName: body.schoolName || "",
       city: body.city || "",
       province: body.province || "",
       country: body.country || "",
-      gradeLevel: body.gradeLevel || "",
     },
   });
 
