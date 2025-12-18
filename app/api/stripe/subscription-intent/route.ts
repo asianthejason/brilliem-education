@@ -11,15 +11,19 @@ export async function POST(req: Request) {
   const { userId } = await auth();
   if (!userId) return new Response("Unauthorized", { status: 401 });
 
-  const { tier } = await req.json();
-  const price = priceForTier(tier);
+  const { tier, paymentMethodId } = (await req.json()) as {
+    tier?: string;
+    paymentMethodId?: string;
+  };
+
+  const price = priceForTier(tier || "");
   if (!price) return new Response("Invalid tier", { status: 400 });
+  if (!paymentMethodId) return new Response("Missing paymentMethodId", { status: 400 });
 
   const client = await clerkClient();
   const user = await client.users.getUser(userId);
 
-  const existingCustomerId =
-    (user.privateMetadata?.stripeCustomerId as string | undefined) ?? null;
+  const existingCustomerId = (user.privateMetadata as any)?.stripeCustomerId as string | undefined;
 
   const customerId =
     existingCustomerId ||
@@ -36,30 +40,32 @@ export async function POST(req: Request) {
       privateMetadata: {
         ...(user.privateMetadata || {}),
         stripeCustomerId: customerId,
-      },
+      } as any,
     });
   }
 
-  // Create an incomplete subscription + payment intent for Payment Element
+  // Attach the PaymentMethod and set as default for invoices
+  await stripe.paymentMethods.attach(paymentMethodId, { customer: customerId });
+  await stripe.customers.update(customerId, {
+    invoice_settings: { default_payment_method: paymentMethodId },
+  });
+
+  // Create subscription (incomplete until payment confirmed)
   const sub = await stripe.subscriptions.create({
     customer: customerId,
     items: [{ price }],
     payment_behavior: "default_incomplete",
     payment_settings: { save_default_payment_method: "on_subscription" },
     expand: ["latest_invoice.payment_intent"],
-    metadata: { clerkUserId: userId, tier },
+    metadata: { clerkUserId: userId, tier: tier || "" },
   });
 
-  const pi = sub.latest_invoice && (sub.latest_invoice as any).payment_intent;
+  const pi = (sub.latest_invoice as any)?.payment_intent;
   const clientSecret = pi?.client_secret as string | undefined;
-
-  if (!clientSecret) {
-    return new Response("Missing payment intent client secret", { status: 500 });
-  }
+  if (!clientSecret) return new Response("Missing payment intent client secret", { status: 500 });
 
   return Response.json({
-    clientSecret,
     subscriptionId: sub.id,
-    customerId,
+    clientSecret,
   });
 }

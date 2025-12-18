@@ -73,6 +73,8 @@ function Field({
   );
 }
 
+const FINALIZE_FLAG = "brilliem_finalize_after_verify";
+
 export function GetStartedClient({ mode }: { mode: Mode }) {
   const router = useRouter();
   const { user } = useUser();
@@ -116,9 +118,24 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  async function ensureStripeLoaded() {
+    const pk = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY;
+    if (!pk) throw new Error("Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY");
+
+    if (stripeRef.current) return stripeRef.current;
+
+    const stripe = await loadStripe(pk);
+    if (!stripe) throw new Error("Stripe failed to load");
+    stripeRef.current = stripe;
+    return stripe;
+  }
+
   async function ensureStripeAndCardMounted() {
     if (!paid) return;
     if (!cardMountRef.current) return;
+
+    // Always ensure stripe is loaded
+    const stripe = await ensureStripeLoaded();
 
     // Clean any previous (safe even if none)
     try {
@@ -129,13 +146,6 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     cardRef.current = null;
     setCardReady(false);
 
-    const pk = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY;
-    if (!pk) throw new Error("Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY");
-
-    const stripe = await loadStripe(pk);
-    if (!stripe) throw new Error("Stripe failed to load");
-
-    stripeRef.current = stripe;
     const elements = stripe.elements(); // Card Element doesn't require clientSecret
     elementsRef.current = elements;
 
@@ -153,10 +163,10 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   }
 
   async function createPaymentMethodId() {
-    const stripe = stripeRef.current;
+    const stripe = await ensureStripeLoaded();
     const card = cardRef.current;
 
-    if (!stripe || !card) throw new Error("Payment field not ready yet.");
+    if (!card) throw new Error("Payment field not ready yet.");
 
     const pm = await stripe.createPaymentMethod({
       type: "card",
@@ -237,7 +247,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     if (!res.ok) throw new Error("Failed to save profile.");
   }
 
-  async function ensureSubscriptionIntent() {
+  async function ensureSubscriptionIntent(paymentMethodId: string) {
     if (!paid) return;
 
     // If we already have one for current flow, reuse it
@@ -246,13 +256,13 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     const res = await fetch("/api/stripe/subscription-intent", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tier }),
+      body: JSON.stringify({ tier, paymentMethodId }),
     });
 
-    const data = (await res.json()) as { clientSecret?: string; subscriptionId?: string };
+    const data = (await res.json()) as { clientSecret?: string; subscriptionId?: string; message?: string };
 
     if (!res.ok || !data.clientSecret || !data.subscriptionId) {
-      throw new Error("Could not initialize subscription.");
+      throw new Error(data?.message || "Could not initialize subscription.");
     }
 
     setClientSecret(data.clientSecret);
@@ -327,7 +337,13 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
 
       if (res.status === "complete") {
         await setActive({ session: res.createdSessionId });
-        router.replace("/get-started");
+
+        // After we become signed-in, we want to auto-finalize the selected tier + payment (if any).
+        // We do this on the next render in onboarding mode.
+        sessionStorage.setItem(FINALIZE_FLAG, "1");
+
+        // Add a query param so the route definitely remounts/re-renders.
+        router.replace("/get-started?postVerify=1");
         router.refresh();
         return;
       }
@@ -346,11 +362,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   async function confirmAndActivatePaidPlan() {
     if (!paid) return;
 
-    // Ensure server-side subscription exists (returns PaymentIntent client secret)
-    await ensureSubscriptionIntent();
-
-    const stripe = stripeRef.current;
-    if (!stripe) throw new Error("Stripe not ready yet.");
+    const stripe = await ensureStripeLoaded();
 
     // Use stored payment method if we already created it during signup,
     // otherwise create it from the card field now.
@@ -360,6 +372,9 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
       pmId = await createPaymentMethodId();
       setStoredPaymentMethodId(pmId);
     }
+
+    // Ensure server-side subscription exists (returns PaymentIntent client secret)
+    await ensureSubscriptionIntent(pmId);
 
     if (!clientSecret || !subscriptionId) throw new Error("Missing payment info. Please try again.");
 
@@ -383,6 +398,41 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     }
   }
 
+  // Auto-finalize immediately after email verification completes and we arrive in onboarding mode.
+  useEffect(() => {
+    if (mode !== "onboarding") return;
+
+    const shouldFinalize = sessionStorage.getItem(FINALIZE_FLAG) === "1";
+    if (!shouldFinalize) return;
+
+    sessionStorage.removeItem(FINALIZE_FLAG);
+
+    (async () => {
+      try {
+        setError(null);
+        setBusy(true);
+
+        await saveProfile(tier);
+
+        if (!paid) {
+          router.push("/dashboard");
+          router.refresh();
+          return;
+        }
+
+        await confirmAndActivatePaidPlan();
+
+        router.push("/dashboard");
+        router.refresh();
+      } catch (e: any) {
+        setError(e?.message || "Payment failed. Please try again.");
+      } finally {
+        setBusy(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
+
   async function onPrimaryClick() {
     setError(null);
 
@@ -396,7 +446,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         return;
       }
 
-      // onboarding (signed-in)
+      // onboarding (signed-in) manual submit
       setBusy(true);
 
       // Save profile fields first
@@ -425,7 +475,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     !email ||
     (mode === "signup" && signupStep === "form" && !password) ||
     (mode === "signup" && signupStep === "verify" && !verifyCode) ||
-    (paid && !cardReady);
+    (paid && !cardReady && !storedPaymentMethodId);
 
   const primaryLabel =
     mode === "signup"
