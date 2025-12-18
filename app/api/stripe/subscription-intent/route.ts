@@ -44,21 +44,37 @@ export async function POST(req: Request) {
     });
   }
 
-  // Attach the PaymentMethod and set as default for invoices
-  await stripe.paymentMethods.attach(paymentMethodId, { customer: customerId });
+  // Attach the PaymentMethod and set as default for invoices.
+  // If already attached, Stripe will throw; we can safely ignore that case.
+  try {
+    await stripe.paymentMethods.attach(paymentMethodId, { customer: customerId });
+  } catch (e: any) {
+    const code = e?.code as string | undefined;
+    const msg = (e?.message as string | undefined) || "";
+    const alreadyAttached =
+      code === "resource_already_exists" ||
+      msg.toLowerCase().includes("already") ||
+      msg.toLowerCase().includes("attached");
+    if (!alreadyAttached) throw e;
+  }
+
   await stripe.customers.update(customerId, {
     invoice_settings: { default_payment_method: paymentMethodId },
   });
 
-  // Create subscription (incomplete until payment confirmed)
-  const sub = await stripe.subscriptions.create({
-    customer: customerId,
-    items: [{ price }],
-    payment_behavior: "default_incomplete",
-    payment_settings: { save_default_payment_method: "on_subscription" },
-    expand: ["latest_invoice.payment_intent"],
-    metadata: { clerkUserId: userId, tier: tier || "" },
-  });
+  // Create subscription (incomplete until payment is confirmed on the client)
+  const sub = await stripe.subscriptions.create(
+    {
+      customer: customerId,
+      items: [{ price }],
+      payment_behavior: "default_incomplete",
+      payment_settings: { save_default_payment_method: "on_subscription" },
+      expand: ["latest_invoice.payment_intent"],
+      metadata: { clerkUserId: userId, tier: tier || "" },
+    },
+    // helps reduce duplicate subs if the user double-clicks
+    { idempotencyKey: `sub-intent:${userId}:${tier}:${paymentMethodId}` }
+  );
 
   const pi = (sub.latest_invoice as any)?.payment_intent;
   const clientSecret = pi?.client_secret as string | undefined;
