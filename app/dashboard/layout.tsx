@@ -9,9 +9,12 @@ const tabs = [
   { href: "/dashboard/profile", label: "Profile" },
 ];
 
-export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+export default async function DashboardLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   const { userId } = await auth();
-
   if (!userId) redirect("/");
 
   return (
