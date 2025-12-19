@@ -141,6 +141,31 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   const [debugOpen, setDebugOpen] = useState(true);
   const [debugLines, setDebugLines] = useState<string[]>([]);
 
+
+  const DEBUG_PERSIST_KEY = "brilliem_debug_lines_v1";
+
+  // Persist debug logs across full page refreshes so we can see what happened pre-redirect.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(DEBUG_PERSIST_KEY);
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) setDebugLines(arr.filter((x) => typeof x === "string").slice(-400));
+      }
+    } catch {
+      // ignore
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(DEBUG_PERSIST_KEY, JSON.stringify(debugLines.slice(-400)));
+    } catch {
+      // ignore
+    }
+  }, [debugLines]);
+
   const dbg = useCallback((message: string, data?: any) => {
     try {
       const t = new Date();
@@ -207,6 +232,11 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     } catch {}
 
     return {
+      origin: typeof window !== "undefined" ? window.location.origin : null,
+      href: typeof window !== "undefined" ? window.location.href : null,
+      hostname: typeof window !== "undefined" ? window.location.hostname : null,
+      localStorageKeys: (() => { try { return Object.keys(localStorage); } catch { return []; } })(),
+      sessionStorageKeys: (() => { try { return Object.keys(sessionStorage); } catch { return []; } })(),
       mode,
       signupStep,
       hydrated,
@@ -368,7 +398,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         setTier(data.tier);
       if (typeof data.paymentMethodId === "string") setStoredPaymentMethodId(data.paymentMethodId);
 
-      localStorage.removeItem("brilliem_onboarding");
+      // localStorage.removeItem("brilliem_onboarding"); // keep for debugging
     } catch {
       // ignore
     } finally {
@@ -476,6 +506,19 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         })
       );
 
+      // DEBUG: confirm onboarding data is actually present in this origin
+      try {
+        const raw2 = localStorage.getItem("brilliem_onboarding");
+        dbg("storage:afterSetOnboarding", {
+          origin: window.location.origin,
+          href: window.location.href,
+          present: !!raw2,
+          len: raw2 ? raw2.length : 0,
+          localKeys: Object.keys(localStorage),
+          sessionKeys: Object.keys(sessionStorage),
+        });
+      } catch {}
+
       setSignupStep("verify");
     } catch (err: any) {
       const msg =
@@ -504,6 +547,15 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         // After we become signed-in, we want to auto-finalize the selected tier + payment (if any).
         // We do this on the next render in onboarding mode.
         sessionStorage.setItem(FINALIZE_FLAG, "1");
+      try { localStorage.setItem(FINALIZE_FLAG, "1"); } catch {}
+      try {
+        dbg("storage:setFinalizeFlag", {
+          origin: window.location.origin,
+          href: window.location.href,
+          session: sessionStorage.getItem(FINALIZE_FLAG),
+          local: (() => { try { return localStorage.getItem(FINALIZE_FLAG); } catch { return null; } })(),
+        });
+      } catch {}
 
         // Hard navigate so the server definitely re-evaluates auth() and switches the page to onboarding mode.
         window.location.assign("/get-started?postVerify=1");
@@ -572,8 +624,20 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     dbg("finalize:effect:enter", { mode, hydrated, tier, storedPaymentMethodId });
     if (mode !== "onboarding") return;
 
-    const shouldFinalize = sessionStorage.getItem(FINALIZE_FLAG) === "1";
-    dbg("finalize:flag", { shouldFinalize });
+    const shouldFinalize =
+      sessionStorage.getItem(FINALIZE_FLAG) === "1" ||
+      (() => {
+        try {
+          return localStorage.getItem(FINALIZE_FLAG) === "1";
+        } catch {
+          return false;
+        }
+      })();
+    dbg("finalize:flag", {
+      shouldFinalize,
+      session: (() => { try { return sessionStorage.getItem(FINALIZE_FLAG); } catch { return null; } })(),
+      local: (() => { try { return localStorage.getItem(FINALIZE_FLAG); } catch { return null; } })(),
+    });
     if (!shouldFinalize) return;
 
     // Wait until we have hydrated tier/paymentMethodId from localStorage (set in signup step).
@@ -586,11 +650,13 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     if (tier !== "free" && !storedPaymentMethodId) {
       dbg("finalize:missingPaymentMethodId", { tier });
       sessionStorage.removeItem(FINALIZE_FLAG);
+      try { localStorage.removeItem(FINALIZE_FLAG); } catch {}
       setError("We couldn't find your saved card details. Please re-enter your card and try again.");
       return;
     }
 
     sessionStorage.removeItem(FINALIZE_FLAG);
+      try { localStorage.removeItem(FINALIZE_FLAG); } catch {}
 
     (async () => {
       try {
@@ -856,6 +922,18 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
                 className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"
               >
                 Copy logs
+              </button>>
+              <button
+                onClick={() => {
+                  try {
+                    localStorage.removeItem(DEBUG_PERSIST_KEY);
+                  } catch {}
+                  setDebugLines([]);
+                  dbg("debug:clearedPersistedLogs");
+                }}
+                className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"
+              >
+                Clear logs
               </button>
             </div>
           </div>
