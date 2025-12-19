@@ -1,13 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useSignUp, useUser } from "@clerk/nextjs";
 import { loadStripe } from "@stripe/stripe-js";
-import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-stripe-js";
+import type { Stripe, StripeElements } from "@stripe/stripe-js";
 
 type Mode = "signup" | "onboarding";
 type Tier = "free" | "lessons" | "lessons_ai";
+type PaidTier = Exclude<Tier, "free">;
 
 const stripePromise = loadStripe(process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY || "");
 
@@ -17,119 +18,60 @@ const TIERS: Array<{
   price: string;
   bullets: string[];
 }> = [
-  {
-    id: "free",
-    name: "Free",
-    price: "$0",
-    bullets: ["Browse content", "Basic tools"],
-  },
-  {
-    id: "lessons",
-    name: "Lessons",
-    price: "$?/mo",
-    bullets: ["Book lessons", "Premium content"],
-  },
-  {
-    id: "lessons_ai",
-    name: "Lessons + AI Tutor",
-    price: "$?/mo",
-    bullets: ["Everything in Lessons", "AI tutor"],
-  },
+  { id: "free", name: "Free", price: "$0", bullets: ["Browse content", "Basic tools"] },
+  { id: "lessons", name: "Lessons", price: "CA$10/mo", bullets: ["Book lessons", "Premium content"] },
+  { id: "lessons_ai", name: "Lessons + AI", price: "CA$15/mo", bullets: ["Everything in Lessons", "AI tutor"] },
 ];
+
+function cx(...parts: Array<string | false | null | undefined>) {
+  return parts.filter(Boolean).join(" ");
+}
 
 function Field({
   label,
   value,
   onChange,
-  type = "text",
   placeholder,
-  required,
-  disabled,
+  type = "text",
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
-  type?: string;
   placeholder?: string;
-  required?: boolean;
-  disabled?: boolean;
+  type?: string;
 }) {
   return (
     <label className="block">
-      <div className="mb-1 text-sm text-white/80">{label}</div>
+      <div className="text-sm font-medium text-white/80">{label}</div>
       <input
-        className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white placeholder:text-white/30 outline-none focus:border-white/25"
+        className="mt-1 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white placeholder:text-white/40 outline-none focus:border-white/20"
         value={value}
-        type={type}
-        placeholder={placeholder}
-        required={required}
-        disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        type={type}
       />
     </label>
   );
 }
 
-function TierCard({
-  tier,
-  selected,
-  onSelect,
-  disabled,
-}: {
-  tier: (typeof TIERS)[number];
-  selected: boolean;
-  onSelect: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onSelect}
-      disabled={disabled}
-      className={[
-        "w-full rounded-2xl border p-4 text-left transition",
-        selected ? "border-white/40 bg-white/10" : "border-white/10 bg-white/5 hover:border-white/25",
-        disabled ? "opacity-60 cursor-not-allowed" : "",
-      ].join(" ")}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="text-lg font-semibold text-white">{tier.name}</div>
-          <div className="mt-0.5 text-sm text-white/70">{tier.price}</div>
-        </div>
-        <div
-          className={[
-            "mt-1 h-4 w-4 rounded-full border",
-            selected ? "border-white bg-white" : "border-white/40",
-          ].join(" ")}
-        />
-      </div>
-      <ul className="mt-3 space-y-1 text-sm text-white/75">
-        {tier.bullets.map((b) => (
-          <li key={b} className="flex gap-2">
-            <span className="mt-1 inline-block h-1.5 w-1.5 rounded-full bg-white/60" />
-            <span>{b}</span>
-          </li>
-        ))}
-      </ul>
-    </button>
-  );
-}
-
-export function GetStartedClient({ mode }: { mode: Mode }) {
+export function GetStartedClient({ mode = "signup" as Mode }: { mode?: Mode }) {
   const router = useRouter();
   const params = useSearchParams();
-
-  const { user, isLoaded: userLoaded } = useUser();
+  const { user } = useUser();
   const { isLoaded: signUpLoaded, signUp, setActive } = useSignUp();
 
-  const [tier, setTier] = useState<Tier>("free");
+  const [tier, setTier] = useState<Tier>("lessons");
 
-  // Profile fields (saved to Clerk unsafeMetadata via /api/onboarding)
-  const [firstName, setFirstName] = useState("");
-  const [lastName, setLastName] = useState("");
+  // Signup fields
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+
+  // Verify
+  const [verifyCode, setVerifyCode] = useState("");
+
+  // Onboarding fields
   const [gradeLevel, setGradeLevel] = useState("");
   const [schoolName, setSchoolName] = useState("");
   const [city, setCity] = useState("");
@@ -139,571 +81,407 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   const [step, setStep] = useState<"signup" | "verify" | "onboarding" | "payment">(
     mode === "signup" ? "signup" : "onboarding"
   );
-  const [verifyCode, setVerifyCode] = useState("");
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
-  // Stripe Payment Element state
-  const [paymentClientSecret, setPaymentClientSecret] = useState<string | null>(null);
-  const [paymentSubscriptionId, setPaymentSubscriptionId] = useState<string | null>(null);
+  // Payment element state
+  const [clientSecret, setClientSecret] = useState<string | null>(null);
+  const [subscriptionId, setSubscriptionId] = useState<string | null>(null);
+  const stripeRef = useRef<Stripe | null>(null);
+  const elementsRef = useRef<StripeElements | null>(null);
+  const paymentMountedRef = useRef(false);
+  const paymentHostRef = useRef<HTMLDivElement | null>(null);
 
-  const isSignedIn = !!user?.id;
-  const userTier = (user?.unsafeMetadata?.tier as Tier | undefined) ?? "free";
-  const requestedTier = (user?.unsafeMetadata?.requestedTier as Tier | undefined) ?? null;
 
-  const paidSelected = useMemo(() => tier !== "free", [tier]);
-
-  // Prefill from Clerk when signed in
+  // Initialize Stripe object once
   useEffect(() => {
-    if (!userLoaded || !user) return;
+    let cancelled = false;
+    (async () => {
+      const stripe = await stripePromise;
+      if (!cancelled) stripeRef.current = stripe;
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-    setFirstName((v) => v || user.firstName || "");
-    setLastName((v) => v || user.lastName || "");
-    const primaryEmail = user.emailAddresses?.[0]?.emailAddress || "";
-    setEmail((v) => v || primaryEmail);
-
-    const md = (user.unsafeMetadata ?? {}) as any;
-    if (typeof md.gradeLevel === "string") setGradeLevel(md.gradeLevel);
-    if (typeof md.schoolName === "string") setSchoolName(md.schoolName);
-    if (typeof md.city === "string") setCity(md.city);
-    if (typeof md.province === "string") setProvince(md.province);
-    if (typeof md.country === "string" && md.country) setCountry(md.country);
-
-    // If user already picked a requested tier, keep it selected in the UI
-    if (md.requestedTier === "lessons" || md.requestedTier === "lessons_ai") setTier(md.requestedTier);
-    else if (md.tier === "lessons" || md.tier === "lessons_ai" || md.tier === "free") setTier(md.tier);
-  }, [userLoaded, user]);
-
-  // Handle return from 3DS (if the bank requires a redirect) and finalize tier.
+  // Mount Payment Element when we have a clientSecret and we're on the payment step
   useEffect(() => {
-    if (!isSignedIn) return;
+    const stripe = stripeRef.current;
+    if (!stripe) return;
+    if (!clientSecret) return;
+    if (step !== "payment") return;
+    if (!paymentHostRef.current) return;
+    if (paymentMountedRef.current) return;
 
-    const payment = params.get("payment");
-    const subscriptionId = params.get("subscription_id");
-    const tierParam = params.get("tier") as Tier | null;
+    const elements = stripe.elements({ clientSecret });
+    const paymentElement = elements.create("payment");
+    paymentElement.mount(paymentHostRef.current);
+    elementsRef.current = elements;
+    paymentMountedRef.current = true;
 
-    if (payment === "complete" && subscriptionId && (tierParam === "lessons" || tierParam === "lessons_ai")) {
-      setBusy(true);
-      setError(null);
-      setInfo("Finalizing your subscription…");
-      (async () => {
-        try {
-          const res = await fetch("/api/stripe/activate", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ subscriptionId, tier: tierParam }),
-          });
-          if (!res.ok) throw new Error(await res.text());
+    return () => {
+      try {
+        paymentElement.unmount();
+      } catch {}
+      elementsRef.current = null;
+      paymentMountedRef.current = false;
+    };
+  }, [clientSecret, step]);
 
-          setInfo("Payment confirmed! Your subscription is active.");
-          setStep("onboarding");
-          router.replace("/get-started");
-          router.refresh();
-        } catch (e: any) {
-          setError(e?.message || "Could not finalize payment.");
-        } finally {
-          setBusy(false);
+  // Handle returning from a bank-required redirect (3D Secure)
+  useEffect(() => {
+    const piSecret = params.get("payment_intent_client_secret");
+    const sid = params.get("sid");
+    const t = params.get("tier") as Tier | null;
+    if (!piSecret || !sid || !t) return;
+
+    // only run once per load
+    const key = `brilliem_payment_return_${sid}`;
+    if (sessionStorage.getItem(key)) return;
+    sessionStorage.setItem(key, "1");
+
+    (async () => {
+      try {
+        setBusy(true);
+        setError(null);
+        setInfo("Finishing your payment…");
+
+        const stripe = await stripePromise;
+        if (!stripe) throw new Error("Stripe failed to load");
+
+        const { paymentIntent, error: retrieveErr } = await stripe.retrievePaymentIntent(piSecret);
+        if (retrieveErr) throw new Error(retrieveErr.message || "Failed to retrieve payment intent");
+
+        if (paymentIntent?.status === "succeeded" || paymentIntent?.status === "processing") {
+          await finalizeActivation({ subscriptionId: sid, tier: t });
+          setInfo("Payment successful! Your subscription is active.");
+          router.replace("/get-started?postVerify=1");
+        } else {
+          setError(`Payment not completed (status: ${paymentIntent?.status || "unknown"})`);
+          setInfo(null);
         }
-      })();
-    }
+      } catch (e: any) {
+        setError(e?.message || "Failed to finish payment");
+        setInfo(null);
+      } finally {
+        setBusy(false);
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSignedIn]);
+  }, [params]);
 
-  async function saveOnboarding(desiredTier: Tier) {
-    const res = await fetch("/api/onboarding", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        firstName,
-        lastName,
-        tier: desiredTier,
-        gradeLevel,
-        schoolName,
-        city,
-        province,
-        country,
-      }),
-    });
-
-    if (!res.ok) {
-      throw new Error(await res.text());
-    }
-  }
-
-  async function beginOnPagePayment(desiredTier: Exclude<Tier, "free">) {
-    setError(null);
-    setInfo("Preparing payment…");
-    setPaymentClientSecret(null);
-    setPaymentSubscriptionId(null);
-
-    const res = await fetch("/api/stripe/subscription-intent", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tier: desiredTier }),
-    });
-
-    const data = (await res.json().catch(() => null)) as
-      | { clientSecret?: string; subscriptionId?: string }
-      | null;
-
-    if (!res.ok || !data?.clientSecret || !data?.subscriptionId) {
-      const txt = (await res.text().catch(() => "")) || "Could not start payment.";
-      throw new Error(txt);
-    }
-
-    setPaymentClientSecret(data.clientSecret);
-    setPaymentSubscriptionId(data.subscriptionId);
-    setStep("payment");
-    setInfo(null);
-  }
-
-  async function doSignUp() {
-    setError(null);
-    setInfo(null);
-
-    if (!signUpLoaded || !signUp) return;
-
-    if (!firstName || !lastName || !email || !password) {
-      setError("Please fill in First name, Last name, Email, and Password.");
-      return;
-    }
-
-    setBusy(true);
-    try {
-      await signUp.create({
-        firstName,
-        lastName,
-        emailAddress: email,
-        password,
-      });
-
-      await signUp.prepareEmailAddressVerification({ strategy: "email_code" });
-      setStep("verify");
-    } catch (err: any) {
-      const msg =
-        err?.errors?.[0]?.longMessage ||
-        err?.errors?.[0]?.message ||
-        err?.message ||
-        "Could not create account.";
-      setError(msg);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function doVerify() {
-    setError(null);
-    setInfo(null);
-
-    if (!signUpLoaded || !signUp) return;
-
-    if (!verifyCode) {
-      setError("Please enter the verification code.");
-      return;
-    }
-
-    setBusy(true);
-    try {
-      const res = await signUp.attemptEmailAddressVerification({ code: verifyCode });
-
-      if (res.status !== "complete") {
-        setError("Verification incomplete. Please try again.");
-        return;
-      }
-
-      await setActive({ session: res.createdSessionId });
-
-      // At this point the user is signed in, so we can save onboarding info
-      // and either finish (free) or start on-page payment (paid).
-      if (tier === "free") {
-        await saveOnboarding("free");
-        setInfo("Account created! You're on the Free plan.");
-        setStep("onboarding");
-        router.refresh();
-      } else {
-        // Save profile + requestedTier (tier stays free until payment confirmed)
-        await saveOnboarding(tier);
-        await beginOnPagePayment(tier);
-      }
-    } catch (err: any) {
-      const msg =
-        err?.errors?.[0]?.longMessage ||
-        err?.errors?.[0]?.message ||
-        err?.message ||
-        "Invalid verification code.";
-      setError(msg);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function doOnboardingContinue() {
-    setError(null);
-    setInfo(null);
-    if (!isSignedIn) return;
-
-    setBusy(true);
-    try {
-      if (tier === "free") {
-        await saveOnboarding("free");
-        setInfo("Saved! You're on the Free plan.");
-        router.refresh();
-        return;
-      }
-
-      // Paid: save requestedTier (tier remains free until Stripe confirmation) then on-page payment.
-      await saveOnboarding(tier);
-      await beginOnPagePayment(tier);
-    } catch (e: any) {
-      setError(e?.message || "Could not continue.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const title =
-    step === "verify"
-      ? "Verify your email"
-      : step === "payment"
-        ? "Complete payment"
-      : isSignedIn
-        ? "Finish setup"
-        : "Get started";
-
-  const primaryLabel =
-    step === "verify"
-      ? "Verify"
-      : step === "payment"
-        ? ""
-      : isSignedIn
-        ? tier === "free"
-          ? "Save"
-          : "Continue to payment"
-        : "Create account";
-
-  const primaryDisabled =
-    busy ||
-    (step === "verify" ? !verifyCode : !firstName || !lastName) ||
-    (!isSignedIn && step !== "verify" && (!email || !password));
-
-  return (
-    <div className="min-h-[calc(100vh-64px)] bg-black">
-      <div className="mx-auto max-w-5xl px-4 py-10">
-        <div className="mb-6">
-          <h1 className="text-3xl font-bold text-white">{title}</h1>
-          <p className="mt-2 text-white/70">
-            {isSignedIn
-              ? userTier !== "free"
-                ? "Your subscription is active. You can update your profile info anytime."
-                : requestedTier
-                  ? "You selected a paid plan, but payment isn't confirmed yet. Continue to payment to activate it."
-                  : "Select a plan and save your profile details."
-              : "Create an account, verify your email, then complete payment if you chose a paid plan."}
-          </p>
-        </div>
-
-        {(error || info) && (
-          <div
-            className={[
-              "mb-6 rounded-2xl border px-4 py-3 text-sm",
-              error ? "border-red-500/30 bg-red-500/10 text-red-200" : "border-white/10 bg-white/5 text-white/80",
-            ].join(" ")}
-          >
-            {error || info}
-          </div>
-        )}
-
-        <div className="grid gap-6 lg:grid-cols-2">
-          <div className="space-y-4">
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-              <div className="mb-4 text-sm font-semibold text-white/80">Plan</div>
-              <div className="grid gap-3">
-                {TIERS.map((t) => (
-                  <TierCard
-                    key={t.id}
-                    tier={t}
-                    selected={tier === t.id}
-                    onSelect={() => setTier(t.id)}
-                    disabled={userTier !== "free" && t.id !== userTier}
-                  />
-                ))}
-              </div>
-              {userTier !== "free" && (
-                <div className="mt-3 text-xs text-white/60">
-                  You already have an active paid plan ({userTier}). Plan switching can be added later in a billing page.
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-              <div className="mb-4 text-sm font-semibold text-white/80">
-                {isSignedIn ? "Your details" : "Create your account"}
-              </div>
-
-              <div className="grid gap-3">
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <Field label="First name" value={firstName} onChange={setFirstName} required />
-                  <Field label="Last name" value={lastName} onChange={setLastName} required />
-                </div>
-
-                {!isSignedIn && step !== "verify" && (
-                  <>
-                    <Field label="Email" value={email} onChange={setEmail} type="email" required />
-                    <Field label="Password" value={password} onChange={setPassword} type="password" required />
-                  </>
-                )}
-
-                {isSignedIn && (
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <Field label="Grade" value={gradeLevel} onChange={setGradeLevel} placeholder="e.g., 10" />
-                    <Field label="School" value={schoolName} onChange={setSchoolName} placeholder="Optional" />
-                  </div>
-                )}
-
-                {isSignedIn && (
-                  <div className="grid gap-3 sm:grid-cols-3">
-                    <Field label="City" value={city} onChange={setCity} placeholder="Optional" />
-                    <Field label="Province" value={province} onChange={setProvince} placeholder="Optional" />
-                    <Field label="Country" value={country} onChange={setCountry} placeholder="Canada" />
-                  </div>
-                )}
-              </div>
-
-              <div className="mt-5 flex items-center gap-3">
-                {step !== "payment" && (
-                  <button
-                    type="button"
-                    disabled={primaryDisabled}
-                    onClick={step === "verify" ? doVerify : isSignedIn ? doOnboardingContinue : doSignUp}
-                    className={[
-                      "rounded-xl px-4 py-2 text-sm font-semibold",
-                      primaryDisabled ? "bg-white/10 text-white/40" : "bg-white text-black hover:bg-white/90",
-                    ].join(" ")}
-                  >
-                    {busy ? "Please wait…" : primaryLabel}
-                  </button>
-                )}
-
-                {step === "verify" && (
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => setStep("signup")}
-                    className={[
-                      "rounded-xl px-4 py-2 text-sm font-semibold",
-                      busy ? "bg-white/5 text-white/30" : "bg-white/10 text-white/80 hover:bg-white/15",
-                    ].join(" ")}
-                  >
-                    Back
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {step === "verify" && (
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-                <div className="mb-2 text-sm font-semibold text-white/80">Verification code</div>
-                <p className="mb-3 text-sm text-white/70">
-                  We sent a code to {email || "your email"}. Enter it below to verify your account.
-                </p>
-                <Field
-                  label="Code"
-                  value={verifyCode}
-                  onChange={setVerifyCode}
-                  placeholder="123456"
-                  required
-                />
-              </div>
-            )}
-
-            {step === "payment" && paymentClientSecret && paymentSubscriptionId && (
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-                <div className="mb-2 text-sm font-semibold text-white/80">Payment</div>
-                <p className="mb-4 text-sm text-white/70">
-                  Enter your payment details below. You won’t be redirected to a separate Stripe payment page.
-                </p>
-
-                <Elements
-                  stripe={stripePromise}
-                  options={{
-                    clientSecret: paymentClientSecret,
-                    appearance: { theme: "night" },
-                  }}
-                >
-                  <OnPagePaymentForm
-                    tier={tier as Exclude<Tier, "free">}
-                    subscriptionId={paymentSubscriptionId}
-                    onBack={() => setStep(isSignedIn ? "onboarding" : "signup")}
-                    onActivated={() => {
-                      setStep("onboarding");
-                      router.refresh();
-                    }}
-                    setBusy={setBusy}
-                    setError={setError}
-                    setInfo={setInfo}
-                  />
-                </Elements>
-              </div>
-            )}
-
-            {isSignedIn && userTier === "free" && requestedTier && (
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-                <div className="text-sm font-semibold text-white/80">Payment pending</div>
-                <p className="mt-2 text-sm text-white/70">
-                  You selected <span className="text-white">{requestedTier}</span>. Click
-                  <span className="text-white"> Continue to payment</span> to activate it.
-                </p>
-                <div className="mt-4">
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={async () => {
-                      try {
-                        setBusy(true);
-                        setTier(requestedTier);
-                        await beginOnPagePayment(requestedTier);
-                      } catch (e: any) {
-                        setError(e?.message || "Could not start payment.");
-                      } finally {
-                        setBusy(false);
-                      }
-                    }}
-                    className={[
-                      "rounded-xl px-4 py-2 text-sm font-semibold",
-                      busy ? "bg-white/10 text-white/40" : "bg-white text-black hover:bg-white/90",
-                    ].join(" ")}
-                  >
-                    {busy ? "Please wait…" : "Continue to payment"}
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="mt-10 text-xs text-white/40">
-          Troubleshooting tip: Make sure your Stripe keys and price IDs are from the same mode (Test vs Live).
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function OnPagePaymentForm({
-  tier,
-  subscriptionId,
-  onBack,
-  onActivated,
-  setBusy,
-  setError,
-  setInfo,
-}: {
-  tier: Exclude<Tier, "free">;
-  subscriptionId: string;
-  onBack: () => void;
-  onActivated: () => void;
-  setBusy: (v: boolean) => void;
-  setError: (v: string | null) => void;
-  setInfo: (v: string | null) => void;
-}) {
-  const stripe = useStripe();
-  const elements = useElements();
-  const [submitting, setSubmitting] = useState(false);
-
-  async function activateNow() {
+  async function finalizeActivation(input: { subscriptionId: string; tier: Tier }) {
     const res = await fetch("/api/stripe/activate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ subscriptionId, tier }),
+      body: JSON.stringify(input),
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(text || "Failed to activate subscription");
+    }
   }
 
-  async function onSubmit() {
+  async function startSignup() {
+    if (!signUpLoaded || !signUp) return;
+    setBusy(true);
     setError(null);
     setInfo(null);
-
-    if (!stripe || !elements) {
-      setError("Stripe is still loading. Please try again in a moment.");
-      return;
-    }
-
-    setSubmitting(true);
-    setBusy(true);
     try {
-      const returnUrl = `${window.location.origin}/get-started?payment=complete&subscription_id=${encodeURIComponent(
+      const created = await signUp.create({
+        emailAddress: email,
+        password,
+        firstName,
+        lastName,
+      });
+
+      await created.prepareEmailAddressVerification({ strategy: "email_code" });
+      setStep("verify");
+      setInfo("We sent a verification code to your email.");
+    } catch (e: any) {
+      setError(e?.errors?.[0]?.message || e?.message || "Failed to create account");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function verifyEmailCode() {
+    if (!signUpLoaded || !signUp || !setActive) return;
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+    try {
+      const complete = await signUp.attemptEmailAddressVerification({ code: verifyCode });
+      if (complete.status !== "complete") {
+        throw new Error("Verification not complete. Please try again.");
+      }
+      await setActive({ session: complete.createdSessionId });
+      setStep("onboarding");
+      setInfo("Email verified. Finish setup below.");
+    } catch (e: any) {
+      setError(e?.errors?.[0]?.message || e?.message || "Invalid verification code");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitOnboarding() {
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+    try {
+      // Save onboarding + selected tier request
+      const res = await fetch("/api/onboarding", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tier,
+          gradeLevel,
+          schoolName,
+          city,
+          province,
+          country,
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(text || "Failed to save onboarding");
+      }
+
+      if (tier === "free") {
+        setInfo("All set! Your free account is ready.");
+        router.push("/");
+        return;
+      }
+
+      // Create subscription + get client_secret to render Payment Element on-page
+      const tierToSend: PaidTier = tier;
+      const intentRes = await fetch("/api/stripe/subscription-intent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tier: tierToSend }),
+      });
+      if (!intentRes.ok) {
+        const text = await intentRes.text().catch(() => "");
+        throw new Error(text || "Failed to start subscription");
+      }
+      const data = (await intentRes.json()) as { subscriptionId: string; clientSecret: string };
+      setSubscriptionId(data.subscriptionId);
+      setClientSecret(data.clientSecret);
+      setStep("payment");
+      setInfo(null);
+    } catch (e: any) {
+      setError(e?.message || "Something went wrong");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmPayment() {
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+    try {
+      if (!subscriptionId || !clientSecret) throw new Error("Missing subscription info");
+      const stripe = await stripePromise;
+      if (!stripe) throw new Error("Stripe failed to load");
+      const elements = elementsRef.current;
+      if (!elements) throw new Error("Payment form not ready yet");
+
+      const origin = window.location.origin;
+      const returnUrl = `${origin}/get-started?postVerify=1&paymentReturn=1&sid=${encodeURIComponent(
         subscriptionId
       )}&tier=${encodeURIComponent(tier)}`;
 
-      const { error, paymentIntent } = await stripe.confirmPayment({
+      const result = await stripe.confirmPayment({
         elements,
         confirmParams: { return_url: returnUrl },
         redirect: "if_required",
       });
 
-      if (error) {
-        setError(error.message || "Payment failed.");
-        return;
+      if (result.error) {
+        throw new Error(result.error.message || "Payment failed");
       }
 
-      // If Stripe didn't redirect, we can usually finalize immediately.
-      if (paymentIntent && (paymentIntent.status === "succeeded" || paymentIntent.status === "processing")) {
-        await activateNow();
-        setInfo("Payment confirmed! Your subscription is active.");
-        onActivated();
-        return;
+      // If no redirect was required, we can finalize immediately
+      const status = result.paymentIntent?.status;
+      if (status === "succeeded" || status === "processing") {
+        await finalizeActivation({ subscriptionId, tier });
+        setInfo("Payment successful! Your subscription is active.");
+        router.push("/");
+      } else {
+        setInfo("Payment submitted. If your bank needs verification, you’ll be returned to this page.");
       }
-
-      // If the bank required a redirect, the user will return via return_url
-      // and the effect in GetStartedClient will finalize activation.
-      setInfo("Payment submitted. If your bank needs extra verification, you'll return here to finish.");
     } catch (e: any) {
-      setError(e?.message || "Payment failed.");
+      setError(e?.message || "Payment failed");
     } finally {
-      setSubmitting(false);
       setBusy(false);
     }
   }
 
+  const disabled = busy;
+
   return (
-    <div>
-      <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
-        <PaymentElement />
+    <div className="mx-auto max-w-3xl px-4 py-8">
+      <h1 className="text-3xl font-bold tracking-tight text-white">Get started</h1>
+      <p className="mt-2 text-white/70">Create your account and pick a plan.</p>
+
+      <div className="mt-6 grid gap-4 md:grid-cols-3">
+        {TIERS.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setTier(t.id)}
+            className={cx(
+              "rounded-2xl border p-4 text-left transition",
+              tier === t.id ? "border-white/30 bg-white/10" : "border-white/10 bg-white/5 hover:bg-white/10"
+            )}
+          >
+            <div className="text-base font-semibold text-white">{t.name}</div>
+            <div className="mt-1 text-sm text-white/70">{t.price}</div>
+            <ul className="mt-3 space-y-1 text-sm text-white/60">
+              {t.bullets.map((b) => (
+                <li key={b}>• {b}</li>
+              ))}
+            </ul>
+          </button>
+        ))}
       </div>
 
-      <div className="mt-4 flex items-center gap-3">
-        <button
-          type="button"
-          disabled={submitting}
-          onClick={onSubmit}
-          className={[
-            "rounded-xl px-4 py-2 text-sm font-semibold",
-            submitting ? "bg-white/10 text-white/40" : "bg-white text-black hover:bg-white/90",
-          ].join(" ")}
-        >
-          {submitting ? "Processing…" : "Subscribe"}
-        </button>
+      {error && <div className="mt-6 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>}
+      {info && <div className="mt-6 rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/80">{info}</div>}
 
-        <button
-          type="button"
-          disabled={submitting}
-          onClick={onBack}
-          className={[
-            "rounded-xl px-4 py-2 text-sm font-semibold",
-            submitting ? "bg-white/5 text-white/30" : "bg-white/10 text-white/80 hover:bg-white/15",
-          ].join(" ")}
-        >
-          Back
-        </button>
-      </div>
+      {/* STEP: SIGNUP */}
+      {step === "signup" && (
+        <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-5">
+          <div className="grid gap-3 md:grid-cols-2">
+            <Field label="First name" value={firstName} onChange={setFirstName} placeholder="Jason" />
+            <Field label="Last name" value={lastName} onChange={setLastName} placeholder="Huang" />
+            <div className="md:col-span-2">
+              <Field label="Email" value={email} onChange={setEmail} placeholder="you@example.com" type="email" />
+            </div>
+            <div className="md:col-span-2">
+              <Field label="Password" value={password} onChange={setPassword} placeholder="••••••••" type="password" />
+            </div>
+          </div>
 
-      <div className="mt-3 text-xs text-white/50">
-        Note: some banks require an extra verification step (3D Secure). If so, you'll be brought right back to this page.
-      </div>
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={startSignup}
+            className={cx(
+              "mt-5 w-full rounded-xl px-4 py-2 text-sm font-semibold",
+              disabled ? "bg-white/5 text-white/30" : "bg-white text-black hover:bg-white/90"
+            )}
+          >
+            {busy ? "Creating account…" : "Create account"}
+          </button>
+
+          {user?.id && (
+            <div className="mt-3 text-xs text-white/50">
+              You are already signed in. You can skip to onboarding/payment.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* STEP: VERIFY */}
+      {step === "verify" && (
+        <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-5">
+          <div className="text-sm font-semibold text-white">Verify your email</div>
+          <div className="mt-1 text-sm text-white/70">Enter the code we emailed you.</div>
+
+          <div className="mt-4">
+            <Field label="Verification code" value={verifyCode} onChange={setVerifyCode} placeholder="123456" />
+          </div>
+
+          <div className="mt-5 flex gap-3">
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => setStep("signup")}
+              className={cx(
+                "rounded-xl px-4 py-2 text-sm font-semibold",
+                disabled ? "bg-white/5 text-white/30" : "bg-white/10 text-white/80 hover:bg-white/15"
+              )}
+            >
+              Back
+            </button>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={verifyEmailCode}
+              className={cx(
+                "flex-1 rounded-xl px-4 py-2 text-sm font-semibold",
+                disabled ? "bg-white/5 text-white/30" : "bg-white text-black hover:bg-white/90"
+              )}
+            >
+              {busy ? "Verifying…" : "Verify email"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* STEP: ONBOARDING */}
+      {step === "onboarding" && (
+        <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-5">
+          <div className="text-sm font-semibold text-white">A couple quick details</div>
+          <div className="mt-1 text-sm text-white/70">This helps personalize your experience.</div>
+
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <Field label="Grade level" value={gradeLevel} onChange={setGradeLevel} placeholder="10" />
+            <Field label="School name" value={schoolName} onChange={setSchoolName} placeholder="Your school" />
+            <Field label="City" value={city} onChange={setCity} placeholder="Calgary" />
+            <Field label="Province" value={province} onChange={setProvince} placeholder="AB" />
+            <Field label="Country" value={country} onChange={setCountry} placeholder="Canada" />
+          </div>
+
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={submitOnboarding}
+            className={cx(
+              "mt-5 w-full rounded-xl px-4 py-2 text-sm font-semibold",
+              disabled ? "bg-white/5 text-white/30" : "bg-white text-black hover:bg-white/90"
+            )}
+          >
+            {busy ? (tier === "free" ? "Saving…" : "Continuing…") : tier === "free" ? "Finish" : "Continue to payment"}
+          </button>
+        </div>
+      )}
+
+      {/* STEP: PAYMENT */}
+      {step === "payment" && (
+        <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-5">
+          <div className="text-sm font-semibold text-white">Payment</div>
+          <div className="mt-1 text-sm text-white/70">
+            Complete your subscription without leaving this page.
+          </div>
+
+          <div className="mt-4 rounded-xl border border-white/10 bg-black/20 p-4">
+            <div ref={(el) => (paymentHostRef.current = el)} />
+          </div>
+
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={confirmPayment}
+            className={cx(
+              "mt-5 w-full rounded-xl px-4 py-2 text-sm font-semibold",
+              disabled ? "bg-white/5 text-white/30" : "bg-white text-black hover:bg-white/90"
+            )}
+          >
+            {busy ? "Processing…" : "Subscribe"}
+          </button>
+
+          <div className="mt-3 text-xs text-white/50">
+            Note: some banks require an extra verification step (3D Secure). If so, you’ll be brought back to this page automatically.
+          </div>
+        </div>
+      )}
     </div>
   );
 }
