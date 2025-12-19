@@ -466,7 +466,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode]);
+  }, [mode, hydrated, tier, storedPaymentMethodId]);
 
   async function onPrimaryClick() {
     setError(null);
