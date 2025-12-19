@@ -77,7 +77,7 @@ const FINALIZE_FLAG = "brilliem_finalize_after_verify";
 
 export function GetStartedClient({ mode }: { mode: Mode }) {
   const router = useRouter();
-  const { user } = useUser();
+  const { user, isLoaded: userLoaded } = useUser();
   const { isLoaded: signUpLoaded, signUp, setActive } = useSignUp();
 
   // Required fields
@@ -85,6 +85,19 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   const [lastName, setLastName] = useState(user?.lastName ?? "");
   const [email, setEmail] = useState(user?.primaryEmailAddress?.emailAddress ?? "");
   const [password, setPassword] = useState("");
+
+  // In onboarding mode the Clerk user loads asynchronously on the client.
+  // Populate required fields if they're empty so the primary button can enable.
+  useEffect(() => {
+    if (mode !== "onboarding") return;
+    if (!userLoaded || !user) return;
+
+    const userEmail = user.primaryEmailAddress?.emailAddress ?? "";
+
+    setFirstName((v) => v || user.firstName || "");
+    setLastName((v) => v || user.lastName || "");
+    setEmail((v) => v || userEmail);
+  }, [mode, userLoaded, user]);
 
   // Optional fields
   const [gradeLevel, setGradeLevel] = useState("");
@@ -252,10 +265,10 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     if (!res.ok) throw new Error("Failed to save profile.");
   }
 
-  async function ensureSubscriptionIntent(paymentMethodId: string) {
-    if (!paid) return null;
+    async function ensureSubscriptionIntent(paymentMethodId: string): Promise<{ clientSecret: string; subscriptionId: string }> {
+    if (!paid) throw new Error("No paid plan selected.");
 
-    // If we already have one for the current flow, reuse it
+    // Reuse existing intent for the current flow
     if (clientSecret && subscriptionId) return { clientSecret, subscriptionId };
 
     const res = await fetch("/api/stripe/subscription-intent", {
@@ -265,27 +278,24 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
       body: JSON.stringify({ tier, paymentMethodId }),
     });
 
-    // Route can return plain-text errors (e.g. 401). Parse safely.
-    const text = await res.text();
-    let data: any = {};
-    try {
-      data = text ? JSON.parse(text) : {};
-    } catch {
-      data = {};
-    }
+    const data = (await res.json().catch(() => ({}))) as {
+      clientSecret?: string;
+      subscriptionId?: string;
+      message?: string;
+    };
 
     if (!res.ok) {
-      throw new Error(data?.message || text || "Could not initialize subscription.");
+      throw new Error(data?.message || `Could not initialize subscription (${res.status}).`);
+    }
+    if (!data.clientSecret || !data.subscriptionId) {
+      throw new Error("Server did not return payment details. Please try again.");
     }
 
-    const cs = data?.clientSecret as string | undefined;
-    const sid = data?.subscriptionId as string | undefined;
-    if (!cs || !sid) throw new Error("Could not initialize subscription.");
-
-    setClientSecret(cs);
-    setSubscriptionId(sid);
-    return { clientSecret: cs, subscriptionId: sid };
+    setClientSecret(data.clientSecret);
+    setSubscriptionId(data.subscriptionId);
+    return { clientSecret: data.clientSecret, subscriptionId: data.subscriptionId };
   }
+
 
   async function doSignUp() {
     setError(null);
@@ -391,12 +401,9 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     }
 
     // Ensure server-side subscription exists (returns PaymentIntent client secret)
-    const intent = await ensureSubscriptionIntent(pmId);
-    const cs = intent?.clientSecret || clientSecret;
-    const sid = intent?.subscriptionId || subscriptionId;
-    if (!cs || !sid) throw new Error("Missing payment info. Please try again.");
+        const { clientSecret: cs, subscriptionId: subId } = await ensureSubscriptionIntent(pmId);
 
-    // Pay the first invoice for the subscription
+// Pay the first invoice for the subscription
     const result = await stripe.confirmCardPayment(cs, {
       payment_method: pmId,
     });
@@ -407,8 +414,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     const res = await fetch("/api/stripe/activate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ subscriptionId: sid, tier }),
+      body: JSON.stringify({ subscriptionId: subId, tier }),
     });
 
     if (!res.ok) {
