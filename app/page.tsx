@@ -577,7 +577,7 @@ export default function HomePage() {
             </p>
             <div className="mt-7 flex flex-wrap justify-center gap-3">
               <Link
-                href="#get-started"
+                href="/get-started"
                 className="inline-flex items-center justify-center rounded-full bg-slate-900 px-6 py-3 text-sm font-semibold text-white hover:bg-slate-800"
               >
                 Get started

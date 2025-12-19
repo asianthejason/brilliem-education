@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useSignUp, useUser } from "@clerk/nextjs";
-import { loadStripe, type Stripe, type StripeElements } from "@stripe/stripe-js";
 
 type Mode = "signup" | "onboarding";
 type Tier = "free" | "lessons" | "lessons_ai";
@@ -13,28 +12,24 @@ const TIERS: Array<{
   name: string;
   price: string;
   bullets: string[];
-  accent: string;
 }> = [
   {
     id: "free",
     name: "Free",
     price: "$0",
-    bullets: ["Explore sample lessons", "Try practice questions", "Basic progress"],
-    accent: "from-emerald-500 to-green-500",
+    bullets: ["Browse content", "Basic tools"],
   },
   {
     id: "lessons",
     name: "Lessons",
-    price: "$9.99/mo",
-    bullets: ["Full lessons library", "Unlimited practice", "Unit tests"],
-    accent: "from-sky-500 to-blue-600",
+    price: "$?/mo",
+    bullets: ["Book lessons", "Premium content"],
   },
   {
     id: "lessons_ai",
     name: "Lessons + AI Tutor",
-    price: "$14.99/mo",
-    bullets: ["Everything in Lessons", "AI Tutor chat", "Photo homework help"],
-    accent: "from-purple-500 to-fuchsia-600",
+    price: "$?/mo",
+    bullets: ["Everything in Lessons", "AI tutor"],
   },
 ];
 
@@ -42,218 +37,175 @@ function Field({
   label,
   value,
   onChange,
-  placeholder,
   type = "text",
-  required = false,
-  disabled = false,
+  placeholder,
+  required,
+  disabled,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
-  placeholder?: string;
   type?: string;
+  placeholder?: string;
   required?: boolean;
   disabled?: boolean;
 }) {
   return (
-    <label className="grid gap-1 text-sm">
-      <span className="font-semibold text-slate-800">
-        {label} {required ? <span className="text-red-600">*</span> : null}
-      </span>
+    <label className="block">
+      <div className="mb-1 text-sm text-white/80">{label}</div>
       <input
-        type={type}
+        className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white placeholder:text-white/30 outline-none focus:border-white/25"
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        type={type}
         placeholder={placeholder}
-        className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-slate-400 disabled:bg-slate-50"
         required={required}
         disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
       />
     </label>
   );
 }
 
-const FINALIZE_FLAG = "brilliem_finalize_after_verify";
+function TierCard({
+  tier,
+  selected,
+  onSelect,
+  disabled,
+}: {
+  tier: (typeof TIERS)[number];
+  selected: boolean;
+  onSelect: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      disabled={disabled}
+      className={[
+        "w-full rounded-2xl border p-4 text-left transition",
+        selected ? "border-white/40 bg-white/10" : "border-white/10 bg-white/5 hover:border-white/25",
+        disabled ? "opacity-60 cursor-not-allowed" : "",
+      ].join(" ")}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-lg font-semibold text-white">{tier.name}</div>
+          <div className="mt-0.5 text-sm text-white/70">{tier.price}</div>
+        </div>
+        <div
+          className={[
+            "mt-1 h-4 w-4 rounded-full border",
+            selected ? "border-white bg-white" : "border-white/40",
+          ].join(" ")}
+        />
+      </div>
+      <ul className="mt-3 space-y-1 text-sm text-white/75">
+        {tier.bullets.map((b) => (
+          <li key={b} className="flex gap-2">
+            <span className="mt-1 inline-block h-1.5 w-1.5 rounded-full bg-white/60" />
+            <span>{b}</span>
+          </li>
+        ))}
+      </ul>
+    </button>
+  );
+}
 
-export function GetStartedClient({ mode: initialMode }: { mode: Mode }) {
+export function GetStartedClient({ mode }: { mode: Mode }) {
   const router = useRouter();
+  const params = useSearchParams();
+
   const { user, isLoaded: userLoaded } = useUser();
-
-  // IMPORTANT: derive the effective mode from the *client* session too.
-  // This prevents getting stuck in "signup" UI after Clerk signs the user in,
-  // even if the Server Component prop hasn’t refreshed yet.
-  const mode: Mode = userLoaded && user?.id ? "onboarding" : initialMode;
-
   const { isLoaded: signUpLoaded, signUp, setActive } = useSignUp();
 
-  // Required fields
-  const [firstName, setFirstName] = useState(user?.firstName ?? "");
-  const [lastName, setLastName] = useState(user?.lastName ?? "");
-  const [email, setEmail] = useState(user?.primaryEmailAddress?.emailAddress ?? "");
+  const [tier, setTier] = useState<Tier>("free");
+
+  // Profile fields (saved to Clerk unsafeMetadata via /api/onboarding)
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-
-  // In onboarding mode the Clerk user loads asynchronously on the client.
-  // Populate required fields if they're empty so the primary button can enable.
-  useEffect(() => {
-    if (mode !== "onboarding") return;
-    if (!userLoaded || !user) return;
-
-    const userEmail = user.primaryEmailAddress?.emailAddress ?? "";
-
-    setFirstName((v) => v || user.firstName || "");
-    setLastName((v) => v || user.lastName || "");
-    setEmail((v) => v || userEmail);
-  }, [mode, userLoaded, user]);
-
-  // Optional fields
   const [gradeLevel, setGradeLevel] = useState("");
   const [schoolName, setSchoolName] = useState("");
   const [city, setCity] = useState("");
   const [province, setProvince] = useState("");
   const [country, setCountry] = useState("Canada");
 
-  const [tier, setTier] = useState<Tier>("free");
-
-  // Signup verify step
-  const [signupStep, setSignupStep] = useState<"form" | "verify">("form");
+  const [step, setStep] = useState<"signup" | "verify" | "onboarding">(
+    mode === "signup" ? "signup" : "onboarding"
+  );
   const [verifyCode, setVerifyCode] = useState("");
-
-  const paid = useMemo(() => tier !== "free", [tier]);
-
-  // Stripe: card element mounted for paid tiers (signup + onboarding)
-  const cardMountRef = useRef<HTMLDivElement | null>(null);
-  const stripeRef = useRef<Stripe | null>(null);
-  const elementsRef = useRef<StripeElements | null>(null);
-  const cardRef = useRef<any>(null);
-  const [cardReady, setCardReady] = useState(false);
-
-  // Store payment method id across verify -> onboarding
-  const [storedPaymentMethodId, setStoredPaymentMethodId] = useState<string | null>(null);
-
-  // When switching to onboarding mode after verify, we need to wait for localStorage to hydrate tier + PM.
-  const [hydrated, setHydrated] = useState(false);
-
-  // Subscription intent state (created server-side after signup completes)
-  const [clientSecret, setClientSecret] = useState<string | null>(null);
-  const [subscriptionId, setSubscriptionId] = useState<string | null>(null);
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
 
-  async function ensureStripeLoaded() {
-    const pk = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY;
-    if (!pk) throw new Error("Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY");
+  const isSignedIn = !!user?.id;
+  const userTier = (user?.unsafeMetadata?.tier as Tier | undefined) ?? "free";
+  const requestedTier = (user?.unsafeMetadata?.requestedTier as Tier | undefined) ?? null;
 
-    if (stripeRef.current) return stripeRef.current;
+  const paidSelected = useMemo(() => tier !== "free", [tier]);
 
-    const stripe = await loadStripe(pk);
-    if (!stripe) throw new Error("Stripe failed to load");
-    stripeRef.current = stripe;
-    return stripe;
-  }
-
-  async function ensureStripeAndCardMounted() {
-    if (!paid) return;
-    if (!cardMountRef.current) return;
-
-    // Always ensure stripe is loaded
-    const stripe = await ensureStripeLoaded();
-
-    // Clean any previous (safe even if none)
-    try {
-      cardRef.current?.unmount?.();
-    } catch {
-      // ignore
-    }
-    cardRef.current = null;
-    setCardReady(false);
-
-    const elements = stripe.elements(); // Card Element doesn't require clientSecret
-    elementsRef.current = elements;
-
-    const card = elements.create("card", {
-      style: {
-        base: {
-          fontSize: "16px",
-        },
-      },
-    });
-
-    card.mount(cardMountRef.current);
-    cardRef.current = card;
-    setCardReady(true);
-  }
-
-  async function createPaymentMethodId() {
-    const stripe = await ensureStripeLoaded();
-    const card = cardRef.current;
-
-    if (!card) throw new Error("Payment field not ready yet.");
-
-    const pm = await stripe.createPaymentMethod({
-      type: "card",
-      card,
-      billing_details: {
-        name: `${firstName} ${lastName}`.trim(),
-        email,
-      },
-    });
-
-    if (pm.error) throw new Error(pm.error.message || "Card error.");
-    const id = pm.paymentMethod?.id;
-    if (!id) throw new Error("Could not create payment method.");
-    return id;
-  }
-
-  // Mount/unmount the credit card field whenever tier changes (both modes)
+  // Prefill from Clerk when signed in
   useEffect(() => {
-    setError(null);
+    if (!userLoaded || !user) return;
 
-    if (!paid) {
-      try {
-        cardRef.current?.unmount?.();
-      } catch {
-        // ignore
-      }
-      cardRef.current = null;
-      setCardReady(false);
-      return;
+    setFirstName((v) => v || user.firstName || "");
+    setLastName((v) => v || user.lastName || "");
+    const primaryEmail = user.emailAddresses?.[0]?.emailAddress || "";
+    setEmail((v) => v || primaryEmail);
+
+    const md = (user.unsafeMetadata ?? {}) as any;
+    if (typeof md.gradeLevel === "string") setGradeLevel(md.gradeLevel);
+    if (typeof md.schoolName === "string") setSchoolName(md.schoolName);
+    if (typeof md.city === "string") setCity(md.city);
+    if (typeof md.province === "string") setProvince(md.province);
+    if (typeof md.country === "string" && md.country) setCountry(md.country);
+
+    // If user already picked a requested tier, keep it selected in the UI
+    if (md.requestedTier === "lessons" || md.requestedTier === "lessons_ai") setTier(md.requestedTier);
+    else if (md.tier === "lessons" || md.tier === "lessons_ai" || md.tier === "free") setTier(md.tier);
+  }, [userLoaded, user]);
+
+  // Handle return from Stripe Checkout
+  useEffect(() => {
+    if (!isSignedIn) return;
+
+    const checkout = params.get("checkout");
+    const sessionId = params.get("session_id");
+    const canceled = params.get("canceled");
+
+    if (canceled) setInfo("Checkout canceled. You can try again anytime.");
+
+    if (checkout === "success" && sessionId) {
+      setBusy(true);
+      setError(null);
+      setInfo("Finalizing your subscription…");
+      (async () => {
+        try {
+          const res = await fetch("/api/stripe/checkout-complete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sessionId }),
+          });
+          if (!res.ok) throw new Error(await res.text());
+
+          setInfo("Payment confirmed! Your subscription is active.");
+          // Strip query params so refresh doesn't re-run
+          router.replace("/get-started");
+          router.refresh();
+        } catch (e: any) {
+          setError(e?.message || "Could not finalize checkout.");
+        } finally {
+          setBusy(false);
+        }
+      })();
     }
-
-    ensureStripeAndCardMounted().catch((e: any) =>
-      setError(e?.message || "Could not load card field.")
-    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tier, paid]);
+  }, [isSignedIn]);
 
-  // Keep optional fields (+ tier + paymentMethodId) across verify -> onboarding
-  useEffect(() => {
-    if (mode !== "onboarding") return;
-    try {
-      const raw = localStorage.getItem("brilliem_onboarding");
-      if (!raw) return;
-      const data = JSON.parse(raw);
-
-      if (typeof data.firstName === "string") setFirstName(data.firstName);
-      if (typeof data.lastName === "string") setLastName(data.lastName);
-      if (typeof data.gradeLevel === "string") setGradeLevel(data.gradeLevel);
-      if (typeof data.schoolName === "string") setSchoolName(data.schoolName);
-      if (typeof data.city === "string") setCity(data.city);
-      if (typeof data.province === "string") setProvince(data.province);
-      if (typeof data.country === "string") setCountry(data.country);
-      if (data.tier === "free" || data.tier === "lessons" || data.tier === "lessons_ai")
-        setTier(data.tier);
-      if (typeof data.paymentMethodId === "string") setStoredPaymentMethodId(data.paymentMethodId);
-
-      localStorage.removeItem("brilliem_onboarding");
-    } catch {
-      // ignore
-    } finally {
-      setHydrated(true);
-    }
-  }, [mode, hydrated, tier, storedPaymentMethodId]);
-
-  async function saveProfile(desiredTier: Tier) {
+  async function saveOnboarding(desiredTier: Tier) {
     const res = await fetch("/api/onboarding", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -268,43 +220,31 @@ export function GetStartedClient({ mode: initialMode }: { mode: Mode }) {
         country,
       }),
     });
-    if (!res.ok) throw new Error("Failed to save profile.");
-  }
-
-    async function ensureSubscriptionIntent(paymentMethodId: string): Promise<{ clientSecret: string; subscriptionId: string }> {
-    if (!paid) throw new Error("No paid plan selected.");
-
-    // Reuse existing intent for the current flow
-    if (clientSecret && subscriptionId) return { clientSecret, subscriptionId };
-
-    const res = await fetch("/api/stripe/subscription-intent", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ tier, paymentMethodId }),
-    });
-
-    const data = (await res.json().catch(() => ({}))) as {
-      clientSecret?: string;
-      subscriptionId?: string;
-      message?: string;
-    };
 
     if (!res.ok) {
-      throw new Error(data?.message || `Could not initialize subscription (${res.status}).`);
+      throw new Error(await res.text());
     }
-    if (!data.clientSecret || !data.subscriptionId) {
-      throw new Error("Server did not return payment details. Please try again.");
-    }
-
-    setClientSecret(data.clientSecret);
-    setSubscriptionId(data.subscriptionId);
-    return { clientSecret: data.clientSecret, subscriptionId: data.subscriptionId };
   }
 
+  async function startCheckout(desiredTier: Exclude<Tier, "free">) {
+    const res = await fetch("/api/stripe/checkout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tier: desiredTier }),
+    });
+
+    const data = (await res.json().catch(() => null)) as { url?: string } | null;
+    if (!res.ok || !data?.url) {
+      const txt = (data as any)?.message || (await res.text().catch(() => "")) || "Checkout failed.";
+      throw new Error(typeof txt === "string" ? txt : "Checkout failed.");
+    }
+
+    window.location.assign(data.url);
+  }
 
   async function doSignUp() {
     setError(null);
+    setInfo(null);
 
     if (!signUpLoaded || !signUp) return;
 
@@ -315,14 +255,6 @@ export function GetStartedClient({ mode: initialMode }: { mode: Mode }) {
 
     setBusy(true);
     try {
-      // If paid plan, require card details now and store PaymentMethod ID
-      let paymentMethodId: string | null = null;
-      if (paid) {
-        if (!cardReady) throw new Error("Please wait for the card field to load.");
-        paymentMethodId = await createPaymentMethodId();
-        setStoredPaymentMethodId(paymentMethodId);
-      }
-
       await signUp.create({
         firstName,
         lastName,
@@ -331,24 +263,7 @@ export function GetStartedClient({ mode: initialMode }: { mode: Mode }) {
       });
 
       await signUp.prepareEmailAddressVerification({ strategy: "email_code" });
-
-      // Store everything needed for the onboarding step after verification
-      localStorage.setItem(
-        "brilliem_onboarding",
-        JSON.stringify({
-          firstName,
-          lastName,
-          gradeLevel,
-          schoolName,
-          city,
-          province,
-          country,
-          tier,
-          paymentMethodId,
-        })
-      );
-
-      setSignupStep("verify");
+      setStep("verify");
     } catch (err: any) {
       const msg =
         err?.errors?.[0]?.longMessage ||
@@ -363,28 +278,43 @@ export function GetStartedClient({ mode: initialMode }: { mode: Mode }) {
 
   async function doVerify() {
     setError(null);
+    setInfo(null);
+
     if (!signUpLoaded || !signUp) return;
+
+    if (!verifyCode) {
+      setError("Please enter the verification code.");
+      return;
+    }
 
     setBusy(true);
     try {
       const res = await signUp.attemptEmailAddressVerification({ code: verifyCode });
 
-      if (res.status === "complete") {
-        await setActive({ session: res.createdSessionId });
-
-        // After we become signed-in, we want to auto-finalize the selected tier + payment (if any).
-        // We do this on the next render in onboarding mode.
-        sessionStorage.setItem(FINALIZE_FLAG, "1");
-
-        // Hard navigate so the server definitely re-evaluates auth() and switches the page to onboarding mode.
-        window.location.assign("/get-started?postVerify=1");
+      if (res.status !== "complete") {
+        setError("Verification incomplete. Please try again.");
         return;
       }
-      setError("Verification incomplete. Please try again.");
+
+      await setActive({ session: res.createdSessionId });
+
+      // At this point the user is signed in, so we can save onboarding info
+      // and either finish (free) or start Stripe Checkout (paid).
+      if (tier === "free") {
+        await saveOnboarding("free");
+        setInfo("Account created! You're on the Free plan.");
+        setStep("onboarding");
+        router.refresh();
+      } else {
+        // Save profile + requestedTier (tier stays free until payment confirmed)
+        await saveOnboarding(tier);
+        await startCheckout(tier);
+      }
     } catch (err: any) {
       const msg =
         err?.errors?.[0]?.longMessage ||
         err?.errors?.[0]?.message ||
+        err?.message ||
         "Invalid verification code.";
       setError(msg);
     } finally {
@@ -392,288 +322,197 @@ export function GetStartedClient({ mode: initialMode }: { mode: Mode }) {
     }
   }
 
-  async function confirmAndActivatePaidPlan() {
-    if (!paid) return;
-
-    const stripe = await ensureStripeLoaded();
-
-    // Use stored payment method if we already created it during signup,
-    // otherwise create it from the card field now.
-    let pmId = storedPaymentMethodId;
-    if (!pmId) {
-      if (!cardReady) throw new Error("Please enter your card details.");
-      pmId = await createPaymentMethodId();
-      setStoredPaymentMethodId(pmId);
-    }
-
-    // Ensure server-side subscription exists (returns PaymentIntent client secret)
-        const { clientSecret: cs, subscriptionId: subId } = await ensureSubscriptionIntent(pmId);
-
-// Pay the first invoice for the subscription
-    const result = await stripe.confirmCardPayment(cs, {
-      payment_method: pmId,
-    });
-
-    if (result.error) throw new Error(result.error.message || "Payment failed.");
-
-    // After payment confirmation, activate tier in Clerk (your existing endpoint)
-    const res = await fetch("/api/stripe/activate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ subscriptionId: subId, tier }),
-    });
-
-    if (!res.ok) {
-      const txt = await res.text();
-      throw new Error(`Payment received, but activation failed: ${txt}`);
-    }
-  }
-
-  // Auto-finalize immediately after email verification completes and we arrive in onboarding mode.
-  useEffect(() => {
-    if (mode !== "onboarding") return;
-
-    const shouldFinalize = sessionStorage.getItem(FINALIZE_FLAG) === "1";
-    if (!shouldFinalize) return;
-
-    // Wait until we have hydrated tier/paymentMethodId from localStorage (set in signup step).
-    if (!hydrated) return;
-
-    // If they picked a paid tier during signup, we expect a stored PaymentMethod.
-    if (tier !== "free" && !storedPaymentMethodId) {
-      sessionStorage.removeItem(FINALIZE_FLAG);
-      setError("We couldn't find your saved card details. Please re-enter your card and try again.");
-      return;
-    }
-
-    sessionStorage.removeItem(FINALIZE_FLAG);
-
-    (async () => {
-      try {
-        setError(null);
-        setBusy(true);
-
-        await saveProfile(tier);
-
-        if (!paid) {
-          router.push("/dashboard");
-          router.refresh();
-          return;
-        }
-
-        await confirmAndActivatePaidPlan();
-
-        router.push("/dashboard");
-        router.refresh();
-      } catch (e: any) {
-        setError(e?.message || "Payment failed. Please try again.");
-      } finally {
-        setBusy(false);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, hydrated, tier, storedPaymentMethodId]);
-
-  async function onPrimaryClick() {
+  async function doOnboardingContinue() {
     setError(null);
+    setInfo(null);
+    if (!isSignedIn) return;
 
+    setBusy(true);
     try {
-      if (mode === "signup") {
-        if (signupStep === "form") {
-          await doSignUp();
-          return;
-        }
-        await doVerify();
-        return;
-      }
-
-      // onboarding (signed-in) manual submit
-      setBusy(true);
-
-      // Save profile fields first
-      await saveProfile(tier);
-
-      if (!paid) {
-        router.push("/dashboard");
+      if (tier === "free") {
+        await saveOnboarding("free");
+        setInfo("Saved! You're on the Free plan.");
         router.refresh();
         return;
       }
 
-      await confirmAndActivatePaidPlan();
-      router.push("/dashboard");
-      router.refresh();
+      // Paid: save requestedTier (tier remains free until Stripe confirmation) then checkout.
+      await saveOnboarding(tier);
+      await startCheckout(tier);
     } catch (e: any) {
-      setError(e?.message || "Something went wrong.");
+      setError(e?.message || "Could not continue.");
     } finally {
       setBusy(false);
     }
   }
 
-  const primaryDisabled =
-    busy ||
-    !firstName ||
-    !lastName ||
-    !email ||
-    (mode === "signup" && signupStep === "form" && !password) ||
-    (mode === "signup" && signupStep === "verify" && !verifyCode) ||
-    (paid && !cardReady && !storedPaymentMethodId);
+  const title =
+    step === "verify"
+      ? "Verify your email"
+      : isSignedIn
+        ? "Finish setup"
+        : "Get started";
 
   const primaryLabel =
-    mode === "signup"
-      ? signupStep === "form"
-        ? "Create account"
-        : "Verify email"
-      : paid
-      ? "Subscribe & go to dashboard"
-      : "Create account & go to dashboard";
+    step === "verify"
+      ? "Verify"
+      : isSignedIn
+        ? tier === "free"
+          ? "Save"
+          : "Continue to payment"
+        : "Create account";
+
+  const primaryDisabled =
+    busy ||
+    (step === "verify" ? !verifyCode : !firstName || !lastName) ||
+    (!isSignedIn && step !== "verify" && (!email || !password));
 
   return (
-    <main className="mx-auto max-w-6xl px-4 py-14">
-      <div className="grid gap-10 md:grid-cols-2">
-        {/* LEFT */}
-        <div>
-          <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700">
-            <span className="h-2.5 w-2.5 rounded-full bg-gradient-to-r from-orange-500 to-pink-500" />
-            Get started
+    <div className="min-h-[calc(100vh-64px)] bg-black">
+      <div className="mx-auto max-w-5xl px-4 py-10">
+        <div className="mb-6">
+          <h1 className="text-3xl font-bold text-white">{title}</h1>
+          <p className="mt-2 text-white/70">
+            {isSignedIn
+              ? userTier !== "free"
+                ? "Your subscription is active. You can update your profile info anytime."
+                : requestedTier
+                  ? "You selected a paid plan, but payment isn't confirmed yet. Continue to checkout to activate it."
+                  : "Select a plan and save your profile details."
+              : "Create an account, verify your email, then complete payment if you chose a paid plan."}
+          </p>
+        </div>
+
+        {(error || info) && (
+          <div
+            className={[
+              "mb-6 rounded-2xl border px-4 py-3 text-sm",
+              error ? "border-red-500/30 bg-red-500/10 text-red-200" : "border-white/10 bg-white/5 text-white/80",
+            ].join(" ")}
+          >
+            {error || info}
+          </div>
+        )}
+
+        <div className="grid gap-6 lg:grid-cols-2">
+          <div className="space-y-4">
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
+              <div className="mb-4 text-sm font-semibold text-white/80">Plan</div>
+              <div className="grid gap-3">
+                {TIERS.map((t) => (
+                  <TierCard
+                    key={t.id}
+                    tier={t}
+                    selected={tier === t.id}
+                    onSelect={() => setTier(t.id)}
+                    disabled={userTier !== "free" && t.id !== userTier}
+                  />
+                ))}
+              </div>
+              {userTier !== "free" && (
+                <div className="mt-3 text-xs text-white/60">
+                  You already have an active paid plan ({userTier}). Plan switching can be added later in a billing page.
+                </div>
+              )}
+            </div>
           </div>
 
-          <h1 className="mt-4 text-3xl font-bold tracking-tight text-slate-900 md:text-4xl">
-            Create your Brilliem account
-          </h1>
-          <p className="mt-3 text-slate-600">
-            First name, last name, email, and password are required. The rest is optional.
-          </p>
+          <div className="space-y-4">
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
+              <div className="mb-4 text-sm font-semibold text-white/80">
+                {isSignedIn ? "Your details" : "Create your account"}
+              </div>
 
-          <div className="mt-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-            <div className="grid gap-4 md:grid-cols-2">
-              <Field label="First name" value={firstName} onChange={setFirstName} required />
-              <Field label="Last name" value={lastName} onChange={setLastName} required />
+              <div className="grid gap-3">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Field label="First name" value={firstName} onChange={setFirstName} required />
+                  <Field label="Last name" value={lastName} onChange={setLastName} required />
+                </div>
+
+                {!isSignedIn && step !== "verify" && (
+                  <>
+                    <Field label="Email" value={email} onChange={setEmail} type="email" required />
+                    <Field label="Password" value={password} onChange={setPassword} type="password" required />
+                  </>
+                )}
+
+                {isSignedIn && (
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Field label="Grade" value={gradeLevel} onChange={setGradeLevel} placeholder="e.g., 10" />
+                    <Field label="School" value={schoolName} onChange={setSchoolName} placeholder="Optional" />
+                  </div>
+                )}
+
+                {isSignedIn && (
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <Field label="City" value={city} onChange={setCity} placeholder="Optional" />
+                    <Field label="Province" value={province} onChange={setProvince} placeholder="Optional" />
+                    <Field label="Country" value={country} onChange={setCountry} placeholder="Canada" />
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-5 flex items-center gap-3">
+                <button
+                  type="button"
+                  disabled={primaryDisabled}
+                  onClick={step === "verify" ? doVerify : isSignedIn ? doOnboardingContinue : doSignUp}
+                  className={[
+                    "rounded-xl px-4 py-2 text-sm font-semibold",
+                    primaryDisabled ? "bg-white/10 text-white/40" : "bg-white text-black hover:bg-white/90",
+                  ].join(" ")}
+                >
+                  {busy ? "Please wait…" : primaryLabel}
+                </button>
+
+                {step === "verify" && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setStep("signup")}
+                    className={[
+                      "rounded-xl px-4 py-2 text-sm font-semibold",
+                      busy ? "bg-white/5 text-white/30" : "bg-white/10 text-white/80 hover:bg-white/15",
+                    ].join(" ")}
+                  >
+                    Back
+                  </button>
+                )}
+              </div>
             </div>
 
-            <div className="mt-4 grid gap-4 md:grid-cols-2">
-              <Field label="Email" value={email} onChange={setEmail} type="email" required />
-              <Field
-                label="Password"
-                value={password}
-                onChange={setPassword}
-                type="password"
-                required={mode === "signup"}
-                placeholder={mode === "onboarding" ? "Already set" : "Create a password"}
-                disabled={mode === "onboarding"}
-              />
-            </div>
-
-            {mode === "signup" && signupStep === "verify" && (
-              <div className="mt-4">
+            {step === "verify" && (
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
+                <div className="mb-2 text-sm font-semibold text-white/80">Verification code</div>
+                <p className="mb-3 text-sm text-white/70">
+                  We sent a code to {email || "your email"}. Enter it below to verify your account.
+                </p>
                 <Field
-                  label="Email verification code"
+                  label="Code"
                   value={verifyCode}
                   onChange={setVerifyCode}
-                  placeholder="Code from your email"
+                  placeholder="123456"
                   required
                 />
-                <p className="mt-2 text-xs text-slate-500">Enter the code we emailed you.</p>
               </div>
             )}
 
-            <div className="mt-6 grid gap-4 md:grid-cols-2">
-              <Field
-                label="Grade level (optional)"
-                value={gradeLevel}
-                onChange={setGradeLevel}
-                placeholder="e.g., Grade 7"
-              />
-              <Field label="School name (optional)" value={schoolName} onChange={setSchoolName} />
-            </div>
-
-            <div className="mt-4 grid gap-4 md:grid-cols-2">
-              <Field label="City/Town (optional)" value={city} onChange={setCity} />
-              <Field
-                label="Province (optional)"
-                value={province}
-                onChange={setProvince}
-                placeholder="e.g., AB"
-              />
-            </div>
-
-            <div className="mt-4">
-              <Field label="Country (optional)" value={country} onChange={setCountry} />
-            </div>
+            {isSignedIn && userTier === "free" && requestedTier && (
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
+                <div className="text-sm font-semibold text-white/80">Payment pending</div>
+                <p className="mt-2 text-sm text-white/70">
+                  You selected <span className="text-white">{requestedTier}</span>. Click
+                  <span className="text-white"> Continue to payment</span> to activate it.
+                </p>
+              </div>
+            )}
           </div>
         </div>
 
-        {/* RIGHT */}
-        <div>
-          <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-            <div className="text-sm font-semibold text-slate-900">Choose your plan</div>
-            <div className="mt-1 text-sm text-slate-600">
-              If you choose a paid plan, a credit card field will appear below.
-            </div>
-
-            <div className="mt-5 grid gap-4">
-              {TIERS.map((t) => (
-                <button
-                  key={t.id}
-                  onClick={() => {
-                    setTier(t.id);
-                    setError(null);
-                    // Reset any in-progress subscription intent when switching plans
-                    setClientSecret(null);
-                    setSubscriptionId(null);
-                  }}
-                  className={`relative overflow-hidden rounded-2xl border p-5 text-left shadow-sm transition ${
-                    tier === t.id ? "border-slate-900" : "border-slate-200 hover:border-slate-300"
-                  }`}
-                >
-                  <div
-                    className={`pointer-events-none absolute -right-16 -top-16 h-44 w-44 rounded-full bg-gradient-to-br ${t.accent} opacity-15 blur-2xl`}
-                  />
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="text-base font-semibold text-slate-900">{t.name}</div>
-                      <div className="mt-1 text-sm text-slate-600">{t.price}</div>
-                    </div>
-                    <div className={`h-9 w-9 rounded-xl bg-gradient-to-br ${t.accent} opacity-90`} />
-                  </div>
-                  <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-slate-700">
-                    {t.bullets.map((b) => (
-                      <li key={b}>{b}</li>
-                    ))}
-                  </ul>
-                </button>
-              ))}
-            </div>
-
-            {/* Stripe credit card field: shows for ANY paid tier (signup + onboarding) */}
-            {paid && (
-              <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
-                <div className="text-sm font-semibold text-slate-900">Credit card</div>
-                <div className="mt-3 rounded-xl border border-slate-200 bg-white p-3">
-                  <div ref={cardMountRef} />
-                </div>
-                <div className="mt-2 text-xs text-slate-500">
-                  Your card is processed securely by Stripe.
-                </div>
-              </div>
-            )}
-
-            {error && (
-              <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
-                {error}
-              </div>
-            )}
-
-            {/* Single button */}
-            <button
-              onClick={onPrimaryClick}
-              disabled={primaryDisabled}
-              className="mt-6 inline-flex w-full items-center justify-center rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
-            >
-              {busy ? "Please wait…" : primaryLabel}
-            </button>
-          </div>
+        <div className="mt-10 text-xs text-white/40">
+          Troubleshooting tip: Make sure your Stripe keys and price IDs are from the same mode (Test vs Live).
         </div>
       </div>
-    </main>
+    </div>
   );
 }
