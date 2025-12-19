@@ -15,6 +15,14 @@ export async function POST(req: Request) {
 
   const price = priceForTier(tier);
   if (!price) return new Response("Invalid tier", { status: 400 });
+
+  // Guardrail: Stripe subscriptions require a Price ID (price_...), not a Product ID (prod_...).
+  if (typeof price !== "string" || !price.trim().startsWith("price_")) {
+    return new Response(
+      "Stripe price misconfigured. Set STRIPE_PRICE_LESSONS / STRIPE_PRICE_LESSONS_AI_TUTOR to a Price ID that starts with price_.",
+      { status: 500 }
+    );
+  }
   if (!paymentMethodId) return new Response("Missing paymentMethodId", { status: 400 });
 
   const client = await clerkClient();
@@ -51,7 +59,7 @@ export async function POST(req: Request) {
   // Create subscription (incomplete until payment confirmed)
   const sub = await stripe.subscriptions.create({
     customer: customerId,
-    items: [{ price }],
+    items: [{ price: (price as string).trim() }],
     payment_behavior: "default_incomplete",
     payment_settings: { save_default_payment_method: "on_subscription" },
     expand: ["latest_invoice.payment_intent"],

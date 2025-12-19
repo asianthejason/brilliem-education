@@ -98,7 +98,6 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   // Signup verify step
   const [signupStep, setSignupStep] = useState<"form" | "verify">("form");
   const [verifyCode, setVerifyCode] = useState("");
-  const [verifyOpen, setVerifyOpen] = useState(false);
 
   const paid = useMemo(() => tier !== "free", [tier]);
 
@@ -121,6 +120,16 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Avoid stale verification errors leaking into onboarding UI
+    if (mode === "onboarding") setError(null);
+  }, [mode]);
+
+  useEffect(() => {
+    // Clear old errors when switching between form and verify steps
+    setError(null);
+  }, [signupStep]);
 
   async function ensureStripeLoaded() {
     const pk = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY;
@@ -253,11 +262,11 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     if (!res.ok) throw new Error("Failed to save profile.");
   }
 
-  async function ensureSubscriptionIntent(paymentMethodId: string): Promise<{ clientSecret: string; subscriptionId: string }> {
-    if (!paid) throw new Error("Selected plan is free; no subscription needed.");
+  async function ensureSubscriptionIntent(paymentMethodId: string) {
+    if (!paid) return;
 
     // If we already have one for current flow, reuse it
-    if (clientSecret && subscriptionId) return { clientSecret, subscriptionId };
+    if (clientSecret && subscriptionId) return;
 
     const res = await fetch("/api/stripe/subscription-intent", {
       method: "POST",
@@ -271,11 +280,10 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
       throw new Error(data?.message || "Could not initialize subscription.");
     }
 
-    // Keep in state for UI/debugging, but ALSO return values (setState is async)
     setClientSecret(data.clientSecret);
     setSubscriptionId(data.subscriptionId);
-    return { clientSecret: data.clientSecret, subscriptionId: data.subscriptionId };
   }
+
   async function doSignUp() {
     setError(null);
 
@@ -321,8 +329,8 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         })
       );
 
+      setError(null);
       setSignupStep("verify");
-      setVerifyOpen(true);
     } catch (err: any) {
       const msg =
         err?.errors?.[0]?.longMessage ||
@@ -335,25 +343,6 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     }
   }
 
-
-  async function resendVerificationCode() {
-    setError(null);
-    if (!signUpLoaded || !signUp) return;
-
-    setBusy(true);
-    try {
-      await signUp.prepareEmailAddressVerification({ strategy: "email_code" });
-    } catch (err: any) {
-      const msg =
-        err?.errors?.[0]?.longMessage ||
-        err?.errors?.[0]?.message ||
-        err?.message ||
-        "Could not resend verification code.";
-      setError(msg);
-    } finally {
-      setBusy(false);
-    }
-  }
   async function doVerify() {
     setError(null);
     if (!signUpLoaded || !signUp) return;
@@ -365,22 +354,14 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
       if (res.status === "complete") {
         await setActive({ session: res.createdSessionId });
 
-        // Immediately finalize profile + subscription after verification
-        await saveProfile(tier);
+        // After we become signed-in, we want to auto-finalize the selected tier + payment (if any).
+        // We do this on the next render in onboarding mode.
+        sessionStorage.setItem(FINALIZE_FLAG, "1");
 
-        if (paid) {
-          await confirmAndActivatePaidPlan();
-        }
+        setError(null);
 
-        try {
-          localStorage.removeItem("brilliem_onboarding");
-        } catch {
-          // ignore
-        }
-
-        setVerifyOpen(false);
-        router.push("/dashboard");
-        router.refresh();
+        // Hard navigate so the server definitely re-evaluates auth() and switches the page to onboarding mode.
+        window.location.assign("/get-started?postVerify=1");
         return;
       }
       setError("Verification incomplete. Please try again.");
@@ -410,10 +391,12 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     }
 
     // Ensure server-side subscription exists (returns PaymentIntent client secret)
-    const { clientSecret: cs, subscriptionId: subId } = await ensureSubscriptionIntent(pmId);
+    await ensureSubscriptionIntent(pmId);
+
+    if (!clientSecret || !subscriptionId) throw new Error("Missing payment info. Please try again.");
 
     // Pay the first invoice for the subscription
-    const result = await stripe.confirmCardPayment(cs, {
+    const result = await stripe.confirmCardPayment(clientSecret, {
       payment_method: pmId,
     });
 
@@ -423,8 +406,9 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     const res = await fetch("/api/stripe/activate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ subscriptionId: subId, tier }),
+      body: JSON.stringify({ subscriptionId, tier }),
     });
+
     if (!res.ok) {
       const txt = await res.text();
       throw new Error(`Payment received, but activation failed: ${txt}`);
@@ -485,8 +469,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
           await doSignUp();
           return;
         }
-        // Open verification popup
-        setVerifyOpen(true);
+        await doVerify();
         return;
       }
 
@@ -518,6 +501,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     !lastName ||
     !email ||
     (mode === "signup" && signupStep === "form" && !password) ||
+    (mode === "signup" && signupStep === "verify" && !verifyCode) ||
     (paid && !cardReady && !storedPaymentMethodId);
 
   const primaryLabel =
@@ -565,6 +549,18 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
               />
             </div>
 
+            {mode === "signup" && signupStep === "verify" && (
+              <div className="mt-4">
+                <Field
+                  label="Email verification code"
+                  value={verifyCode}
+                  onChange={setVerifyCode}
+                  placeholder="Code from your email"
+                  required
+                />
+                <p className="mt-2 text-xs text-slate-500">Enter the code we emailed you.</p>
+              </div>
+            )}
 
             <div className="mt-6 grid gap-4 md:grid-cols-2">
               <Field
@@ -664,70 +660,6 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
           </div>
         </div>
       </div>
-
-      {/* Verify Email Modal */}
-      {mode === "signup" && signupStep === "verify" && verifyOpen && (
-        <div className="fixed inset-0 z-[100]">
-          <button
-            aria-label="Close email verification"
-            onClick={() => setVerifyOpen(false)}
-            className="absolute inset-0 bg-black/40"
-          />
-          <div className="relative mx-auto mt-16 w-[min(92vw,480px)] rounded-3xl border border-slate-200 bg-white p-6 shadow-xl">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="text-base font-semibold text-slate-900">Verify your email</div>
-                <div className="mt-1 text-sm text-slate-600">
-                  Enter the code we sent to <span className="font-medium text-slate-900">{email || "your email"}</span>.
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setVerifyOpen(false)}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="mt-5">
-              <Field
-                label="Email verification code"
-                value={verifyCode}
-                onChange={setVerifyCode}
-                placeholder="Code from your email"
-                required
-              />
-              <p className="mt-2 text-xs text-slate-500">Once verified, we’ll finish creating your account and (if selected) activate your subscription.</p>
-            </div>
-
-            <div className="mt-5 flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <button
-                type="button"
-                onClick={resendVerificationCode}
-                disabled={busy}
-                className="inline-flex items-center justify-center rounded-2xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-50 disabled:opacity-60"
-              >
-                Resend code
-              </button>
-              <button
-                type="button"
-                onClick={doVerify}
-                disabled={busy || !verifyCode}
-                className="inline-flex items-center justify-center rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
-              >
-                {busy ? "Verifying…" : "Verify & continue"}
-              </button>
-            </div>
-
-            {error && (
-              <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
-                {error}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </main>
   );
 }
