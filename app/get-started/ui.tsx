@@ -121,16 +121,6 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    // Avoid stale verification errors leaking into onboarding UI
-    if (mode === "onboarding") setError(null);
-  }, [mode]);
-
-  useEffect(() => {
-    // Clear old errors when switching between form and verify steps
-    setError(null);
-  }, [signupStep]);
-
   async function ensureStripeLoaded() {
     const pk = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY;
     if (!pk) throw new Error("Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY");
@@ -263,25 +253,38 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   }
 
   async function ensureSubscriptionIntent(paymentMethodId: string) {
-    if (!paid) return;
+    if (!paid) return null;
 
-    // If we already have one for current flow, reuse it
-    if (clientSecret && subscriptionId) return;
+    // If we already have one for the current flow, reuse it
+    if (clientSecret && subscriptionId) return { clientSecret, subscriptionId };
 
     const res = await fetch("/api/stripe/subscription-intent", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "include",
       body: JSON.stringify({ tier, paymentMethodId }),
     });
 
-    const data = (await res.json()) as { clientSecret?: string; subscriptionId?: string; message?: string };
-
-    if (!res.ok || !data.clientSecret || !data.subscriptionId) {
-      throw new Error(data?.message || "Could not initialize subscription.");
+    // Route can return plain-text errors (e.g. 401). Parse safely.
+    const text = await res.text();
+    let data: any = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = {};
     }
 
-    setClientSecret(data.clientSecret);
-    setSubscriptionId(data.subscriptionId);
+    if (!res.ok) {
+      throw new Error(data?.message || text || "Could not initialize subscription.");
+    }
+
+    const cs = data?.clientSecret as string | undefined;
+    const sid = data?.subscriptionId as string | undefined;
+    if (!cs || !sid) throw new Error("Could not initialize subscription.");
+
+    setClientSecret(cs);
+    setSubscriptionId(sid);
+    return { clientSecret: cs, subscriptionId: sid };
   }
 
   async function doSignUp() {
@@ -329,7 +332,6 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         })
       );
 
-      setError(null);
       setSignupStep("verify");
     } catch (err: any) {
       const msg =
@@ -357,8 +359,6 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         // After we become signed-in, we want to auto-finalize the selected tier + payment (if any).
         // We do this on the next render in onboarding mode.
         sessionStorage.setItem(FINALIZE_FLAG, "1");
-
-        setError(null);
 
         // Hard navigate so the server definitely re-evaluates auth() and switches the page to onboarding mode.
         window.location.assign("/get-started?postVerify=1");
@@ -391,12 +391,13 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     }
 
     // Ensure server-side subscription exists (returns PaymentIntent client secret)
-    await ensureSubscriptionIntent(pmId);
-
-    if (!clientSecret || !subscriptionId) throw new Error("Missing payment info. Please try again.");
+    const intent = await ensureSubscriptionIntent(pmId);
+    const cs = intent?.clientSecret || clientSecret;
+    const sid = intent?.subscriptionId || subscriptionId;
+    if (!cs || !sid) throw new Error("Missing payment info. Please try again.");
 
     // Pay the first invoice for the subscription
-    const result = await stripe.confirmCardPayment(clientSecret, {
+    const result = await stripe.confirmCardPayment(cs, {
       payment_method: pmId,
     });
 
@@ -406,7 +407,8 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     const res = await fetch("/api/stripe/activate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ subscriptionId, tier }),
+      credentials: "include",
+      body: JSON.stringify({ subscriptionId: sid, tier }),
     });
 
     if (!res.ok) {
