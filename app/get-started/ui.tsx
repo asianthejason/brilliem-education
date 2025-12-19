@@ -3,9 +3,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useSignUp, useUser } from "@clerk/nextjs";
+import { loadStripe } from "@stripe/stripe-js";
+import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-stripe-js";
 
 type Mode = "signup" | "onboarding";
 type Tier = "free" | "lessons" | "lessons_ai";
+
+const stripePromise = loadStripe(process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY || "");
 
 const TIERS: Array<{
   id: Tier;
@@ -132,7 +136,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   const [province, setProvince] = useState("");
   const [country, setCountry] = useState("Canada");
 
-  const [step, setStep] = useState<"signup" | "verify" | "onboarding">(
+  const [step, setStep] = useState<"signup" | "verify" | "onboarding" | "payment">(
     mode === "signup" ? "signup" : "onboarding"
   );
   const [verifyCode, setVerifyCode] = useState("");
@@ -140,6 +144,10 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+
+  // Stripe Payment Element state
+  const [paymentClientSecret, setPaymentClientSecret] = useState<string | null>(null);
+  const [paymentSubscriptionId, setPaymentSubscriptionId] = useState<string | null>(null);
 
   const isSignedIn = !!user?.id;
   const userTier = (user?.unsafeMetadata?.tier as Tier | undefined) ?? "free";
@@ -168,35 +176,33 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     else if (md.tier === "lessons" || md.tier === "lessons_ai" || md.tier === "free") setTier(md.tier);
   }, [userLoaded, user]);
 
-  // Handle return from Stripe Checkout
+  // Handle return from 3DS (if the bank requires a redirect) and finalize tier.
   useEffect(() => {
     if (!isSignedIn) return;
 
-    const checkout = params.get("checkout");
-    const sessionId = params.get("session_id");
-    const canceled = params.get("canceled");
+    const payment = params.get("payment");
+    const subscriptionId = params.get("subscription_id");
+    const tierParam = params.get("tier") as Tier | null;
 
-    if (canceled) setInfo("Checkout canceled. You can try again anytime.");
-
-    if (checkout === "success" && sessionId) {
+    if (payment === "complete" && subscriptionId && (tierParam === "lessons" || tierParam === "lessons_ai")) {
       setBusy(true);
       setError(null);
       setInfo("Finalizing your subscription…");
       (async () => {
         try {
-          const res = await fetch("/api/stripe/checkout-complete", {
+          const res = await fetch("/api/stripe/activate", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sessionId }),
+            body: JSON.stringify({ subscriptionId, tier: tierParam }),
           });
           if (!res.ok) throw new Error(await res.text());
 
           setInfo("Payment confirmed! Your subscription is active.");
-          // Strip query params so refresh doesn't re-run
+          setStep("onboarding");
           router.replace("/get-started");
           router.refresh();
         } catch (e: any) {
-          setError(e?.message || "Could not finalize checkout.");
+          setError(e?.message || "Could not finalize payment.");
         } finally {
           setBusy(false);
         }
@@ -226,20 +232,31 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     }
   }
 
-  async function startCheckout(desiredTier: Exclude<Tier, "free">) {
-    const res = await fetch("/api/stripe/checkout", {
+  async function beginOnPagePayment(desiredTier: Exclude<Tier, "free">) {
+    setError(null);
+    setInfo("Preparing payment…");
+    setPaymentClientSecret(null);
+    setPaymentSubscriptionId(null);
+
+    const res = await fetch("/api/stripe/subscription-intent", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ tier: desiredTier }),
     });
 
-    const data = (await res.json().catch(() => null)) as { url?: string } | null;
-    if (!res.ok || !data?.url) {
-      const txt = (data as any)?.message || (await res.text().catch(() => "")) || "Checkout failed.";
-      throw new Error(typeof txt === "string" ? txt : "Checkout failed.");
+    const data = (await res.json().catch(() => null)) as
+      | { clientSecret?: string; subscriptionId?: string }
+      | null;
+
+    if (!res.ok || !data?.clientSecret || !data?.subscriptionId) {
+      const txt = (await res.text().catch(() => "")) || "Could not start payment.";
+      throw new Error(txt);
     }
 
-    window.location.assign(data.url);
+    setPaymentClientSecret(data.clientSecret);
+    setPaymentSubscriptionId(data.subscriptionId);
+    setStep("payment");
+    setInfo(null);
   }
 
   async function doSignUp() {
@@ -299,7 +316,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
       await setActive({ session: res.createdSessionId });
 
       // At this point the user is signed in, so we can save onboarding info
-      // and either finish (free) or start Stripe Checkout (paid).
+      // and either finish (free) or start on-page payment (paid).
       if (tier === "free") {
         await saveOnboarding("free");
         setInfo("Account created! You're on the Free plan.");
@@ -308,7 +325,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
       } else {
         // Save profile + requestedTier (tier stays free until payment confirmed)
         await saveOnboarding(tier);
-        await startCheckout(tier);
+        await beginOnPagePayment(tier);
       }
     } catch (err: any) {
       const msg =
@@ -336,9 +353,9 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         return;
       }
 
-      // Paid: save requestedTier (tier remains free until Stripe confirmation) then checkout.
+      // Paid: save requestedTier (tier remains free until Stripe confirmation) then on-page payment.
       await saveOnboarding(tier);
-      await startCheckout(tier);
+      await beginOnPagePayment(tier);
     } catch (e: any) {
       setError(e?.message || "Could not continue.");
     } finally {
@@ -349,6 +366,8 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   const title =
     step === "verify"
       ? "Verify your email"
+      : step === "payment"
+        ? "Complete payment"
       : isSignedIn
         ? "Finish setup"
         : "Get started";
@@ -356,6 +375,8 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   const primaryLabel =
     step === "verify"
       ? "Verify"
+      : step === "payment"
+        ? ""
       : isSignedIn
         ? tier === "free"
           ? "Save"
@@ -377,7 +398,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
               ? userTier !== "free"
                 ? "Your subscription is active. You can update your profile info anytime."
                 : requestedTier
-                  ? "You selected a paid plan, but payment isn't confirmed yet. Continue to checkout to activate it."
+                  ? "You selected a paid plan, but payment isn't confirmed yet. Continue to payment to activate it."
                   : "Select a plan and save your profile details."
               : "Create an account, verify your email, then complete payment if you chose a paid plan."}
           </p>
@@ -453,17 +474,19 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
               </div>
 
               <div className="mt-5 flex items-center gap-3">
-                <button
-                  type="button"
-                  disabled={primaryDisabled}
-                  onClick={step === "verify" ? doVerify : isSignedIn ? doOnboardingContinue : doSignUp}
-                  className={[
-                    "rounded-xl px-4 py-2 text-sm font-semibold",
-                    primaryDisabled ? "bg-white/10 text-white/40" : "bg-white text-black hover:bg-white/90",
-                  ].join(" ")}
-                >
-                  {busy ? "Please wait…" : primaryLabel}
-                </button>
+                {step !== "payment" && (
+                  <button
+                    type="button"
+                    disabled={primaryDisabled}
+                    onClick={step === "verify" ? doVerify : isSignedIn ? doOnboardingContinue : doSignUp}
+                    className={[
+                      "rounded-xl px-4 py-2 text-sm font-semibold",
+                      primaryDisabled ? "bg-white/10 text-white/40" : "bg-white text-black hover:bg-white/90",
+                    ].join(" ")}
+                  >
+                    {busy ? "Please wait…" : primaryLabel}
+                  </button>
+                )}
 
                 {step === "verify" && (
                   <button
@@ -497,6 +520,36 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
               </div>
             )}
 
+            {step === "payment" && paymentClientSecret && paymentSubscriptionId && (
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
+                <div className="mb-2 text-sm font-semibold text-white/80">Payment</div>
+                <p className="mb-4 text-sm text-white/70">
+                  Enter your payment details below. You won’t be redirected to a separate Stripe payment page.
+                </p>
+
+                <Elements
+                  stripe={stripePromise}
+                  options={{
+                    clientSecret: paymentClientSecret,
+                    appearance: { theme: "night" },
+                  }}
+                >
+                  <OnPagePaymentForm
+                    tier={tier as Exclude<Tier, "free">}
+                    subscriptionId={paymentSubscriptionId}
+                    onBack={() => setStep(isSignedIn ? "onboarding" : "signup")}
+                    onActivated={() => {
+                      setStep("onboarding");
+                      router.refresh();
+                    }}
+                    setBusy={setBusy}
+                    setError={setError}
+                    setInfo={setInfo}
+                  />
+                </Elements>
+              </div>
+            )}
+
             {isSignedIn && userTier === "free" && requestedTier && (
               <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
                 <div className="text-sm font-semibold text-white/80">Payment pending</div>
@@ -504,6 +557,29 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
                   You selected <span className="text-white">{requestedTier}</span>. Click
                   <span className="text-white"> Continue to payment</span> to activate it.
                 </p>
+                <div className="mt-4">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={async () => {
+                      try {
+                        setBusy(true);
+                        setTier(requestedTier);
+                        await beginOnPagePayment(requestedTier);
+                      } catch (e: any) {
+                        setError(e?.message || "Could not start payment.");
+                      } finally {
+                        setBusy(false);
+                      }
+                    }}
+                    className={[
+                      "rounded-xl px-4 py-2 text-sm font-semibold",
+                      busy ? "bg-white/10 text-white/40" : "bg-white text-black hover:bg-white/90",
+                    ].join(" ")}
+                  >
+                    {busy ? "Please wait…" : "Continue to payment"}
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -512,6 +588,121 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         <div className="mt-10 text-xs text-white/40">
           Troubleshooting tip: Make sure your Stripe keys and price IDs are from the same mode (Test vs Live).
         </div>
+      </div>
+    </div>
+  );
+}
+
+function OnPagePaymentForm({
+  tier,
+  subscriptionId,
+  onBack,
+  onActivated,
+  setBusy,
+  setError,
+  setInfo,
+}: {
+  tier: Exclude<Tier, "free">;
+  subscriptionId: string;
+  onBack: () => void;
+  onActivated: () => void;
+  setBusy: (v: boolean) => void;
+  setError: (v: string | null) => void;
+  setInfo: (v: string | null) => void;
+}) {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [submitting, setSubmitting] = useState(false);
+
+  async function activateNow() {
+    const res = await fetch("/api/stripe/activate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subscriptionId, tier }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+  }
+
+  async function onSubmit() {
+    setError(null);
+    setInfo(null);
+
+    if (!stripe || !elements) {
+      setError("Stripe is still loading. Please try again in a moment.");
+      return;
+    }
+
+    setSubmitting(true);
+    setBusy(true);
+    try {
+      const returnUrl = `${window.location.origin}/get-started?payment=complete&subscription_id=${encodeURIComponent(
+        subscriptionId
+      )}&tier=${encodeURIComponent(tier)}`;
+
+      const { error, paymentIntent } = await stripe.confirmPayment({
+        elements,
+        confirmParams: { return_url: returnUrl },
+        redirect: "if_required",
+      });
+
+      if (error) {
+        setError(error.message || "Payment failed.");
+        return;
+      }
+
+      // If Stripe didn't redirect, we can usually finalize immediately.
+      if (paymentIntent && (paymentIntent.status === "succeeded" || paymentIntent.status === "processing")) {
+        await activateNow();
+        setInfo("Payment confirmed! Your subscription is active.");
+        onActivated();
+        return;
+      }
+
+      // If the bank required a redirect, the user will return via return_url
+      // and the effect in GetStartedClient will finalize activation.
+      setInfo("Payment submitted. If your bank needs extra verification, you'll return here to finish.");
+    } catch (e: any) {
+      setError(e?.message || "Payment failed.");
+    } finally {
+      setSubmitting(false);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
+        <PaymentElement />
+      </div>
+
+      <div className="mt-4 flex items-center gap-3">
+        <button
+          type="button"
+          disabled={submitting}
+          onClick={onSubmit}
+          className={[
+            "rounded-xl px-4 py-2 text-sm font-semibold",
+            submitting ? "bg-white/10 text-white/40" : "bg-white text-black hover:bg-white/90",
+          ].join(" ")}
+        >
+          {submitting ? "Processing…" : "Subscribe"}
+        </button>
+
+        <button
+          type="button"
+          disabled={submitting}
+          onClick={onBack}
+          className={[
+            "rounded-xl px-4 py-2 text-sm font-semibold",
+            submitting ? "bg-white/5 text-white/30" : "bg-white/10 text-white/80 hover:bg-white/15",
+          ].join(" ")}
+        >
+          Back
+        </button>
+      </div>
+
+      <div className="mt-3 text-xs text-white/50">
+        Note: some banks require an extra verification step (3D Secure). If so, you'll be brought right back to this page.
       </div>
     </div>
   );

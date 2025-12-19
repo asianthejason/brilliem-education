@@ -1,23 +1,28 @@
 import { auth, clerkClient } from "@clerk/nextjs/server";
 import { stripe } from "@/lib/stripe";
 
-const priceForTier = (tier: string) => {
+type Tier = "lessons" | "lessons_ai";
+
+const priceForTier = (tier: Tier) => {
   if (tier === "lessons") return process.env.STRIPE_PRICE_LESSONS;
-  if (tier === "lessons_ai") return process.env.STRIPE_PRICE_LESSONS_AI_TUTOR;
-  return null;
+  return process.env.STRIPE_PRICE_LESSONS_AI_TUTOR;
 };
 
+/**
+ * Creates a Stripe Subscription in `default_incomplete` state and returns the
+ * PaymentIntent client_secret so the client can confirm payment using the Payment Element.
+ *
+ * This keeps the user on your /get-started page (no redirect to Stripe Checkout).
+ */
 export async function POST(req: Request) {
   const { userId } = await auth();
   if (!userId) return new Response("Unauthorized", { status: 401 });
 
-  const { tier, paymentMethodId } = (await req.json()) as {
-    tier?: string;
-    paymentMethodId?: string;
-  };
+  const { tier } = (await req.json()) as { tier?: Tier };
+  if (!tier) return new Response("Missing tier", { status: 400 });
 
-  const price = priceForTier(tier || "");
-  if (!price) return new Response("Invalid tier", { status: 400 });
+  const price = priceForTier(tier);
+  if (!price) return new Response("Missing Stripe price env var for tier", { status: 500 });
 
   // Guardrail: Stripe subscriptions require a Price ID (price_...), not a Product ID (prod_...).
   if (typeof price !== "string" || !price.trim().startsWith("price_")) {
@@ -26,62 +31,44 @@ export async function POST(req: Request) {
       { status: 500 }
     );
   }
-  if (!paymentMethodId) return new Response("Missing paymentMethodId", { status: 400 });
 
   const client = await clerkClient();
   const user = await client.users.getUser(userId);
 
-  const existingCustomerId = (user.privateMetadata as any)?.stripeCustomerId as string | undefined;
+  const existing = (user.unsafeMetadata ?? {}) as Record<string, unknown>;
+  let customerId = (existing.stripeCustomerId as string | undefined) || undefined;
 
-  const customerId =
-    existingCustomerId ||
-    (
-      await stripe.customers.create({
-        email: user.emailAddresses?.[0]?.emailAddress,
-        name: `${user.firstName ?? ""} ${user.lastName ?? ""}`.trim() || undefined,
-        metadata: { clerkUserId: userId },
-      })
-    ).id;
+  if (!customerId) {
+    const customer = await stripe.customers.create({
+      email: user.emailAddresses?.[0]?.emailAddress || undefined,
+      name: [user.firstName, user.lastName].filter(Boolean).join(" ") || undefined,
+      metadata: { clerkUserId: userId },
+    });
+    customerId = customer.id;
 
-  if (!existingCustomerId) {
     await client.users.updateUser(userId, {
-      privateMetadata: {
-        ...(user.privateMetadata || {}),
+      unsafeMetadata: {
+        ...existing,
         stripeCustomerId: customerId,
-      } as any,
+      },
     });
   }
 
-  // Attach the PaymentMethod and set as default for invoices.
-  // If already attached, Stripe will throw; we can safely ignore that case.
-  try {
-    await stripe.paymentMethods.attach(paymentMethodId, { customer: customerId });
-  } catch (e: any) {
-    const code = e?.code as string | undefined;
-    const msg = (e?.message as string | undefined) || "";
-    const alreadyAttached =
-      code === "resource_already_exists" ||
-      msg.toLowerCase().includes("already") ||
-      msg.toLowerCase().includes("attached");
-    if (!alreadyAttached) throw e;
-  }
+  // Idempotency helps prevent duplicate subscriptions if the user double-clicks.
+  const idempotencyKey = `sub-intent:${userId}:${tier}`;
 
-  await stripe.customers.update(customerId, {
-    invoice_settings: { default_payment_method: paymentMethodId },
-  });
-
-  // Create subscription (incomplete until payment is confirmed on the client)
   const sub = await stripe.subscriptions.create(
     {
       customer: customerId,
       items: [{ price: (price as string).trim() }],
       payment_behavior: "default_incomplete",
-      payment_settings: { save_default_payment_method: "on_subscription" },
+      payment_settings: {
+        save_default_payment_method: "on_subscription",
+      },
       expand: ["latest_invoice.payment_intent"],
-      metadata: { clerkUserId: userId, tier: tier || "" },
+      metadata: { clerkUserId: userId, tier },
     },
-    // helps reduce duplicate subs if the user double-clicks
-    { idempotencyKey: `sub-intent:${userId}:${tier}:${paymentMethodId}` }
+    { idempotencyKey }
   );
 
   const pi = (sub.latest_invoice as any)?.payment_intent;
