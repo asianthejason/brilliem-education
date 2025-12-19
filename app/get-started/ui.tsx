@@ -922,7 +922,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
                 className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"
               >
                 Copy logs
-              </button>>
+              </button>
               <button
                 onClick={() => {
                   try {
