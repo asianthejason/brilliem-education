@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useSignUp, useUser } from "@clerk/nextjs";
 import { loadStripe, type Stripe, type StripeElements } from "@stripe/stripe-js";
@@ -89,7 +89,6 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   // In onboarding mode the Clerk user loads asynchronously on the client.
   // Populate required fields if they're empty so the primary button can enable.
   useEffect(() => {
-    dbg("finalize:effect:enter", { mode, hydrated, tier, storedPaymentMethodId });
     if (mode !== "onboarding") return;
     if (!userLoaded || !user) return;
 
@@ -135,175 +134,21 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-
-  // ---- DEBUG (temporary) ----
-  // Shows a rolling on-screen log so we can see exactly where Stripe stops.
-  const [debugOpen, setDebugOpen] = useState(true);
-  const [debugLines, setDebugLines] = useState<string[]>([]);
-
-
-  const DEBUG_PERSIST_KEY = "brilliem_debug_lines_v1";
-
-  // Persist debug logs across full page refreshes so we can see what happened pre-redirect.
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(DEBUG_PERSIST_KEY);
-      if (raw) {
-        const arr = JSON.parse(raw);
-        if (Array.isArray(arr)) setDebugLines(arr.filter((x) => typeof x === "string").slice(-400));
-      }
-    } catch {
-      // ignore
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(DEBUG_PERSIST_KEY, JSON.stringify(debugLines.slice(-400)));
-    } catch {
-      // ignore
-    }
-  }, [debugLines]);
-
-  const dbg = useCallback((message: string, data?: any) => {
-    try {
-      const t = new Date();
-      const hh = String(t.getHours()).padStart(2, "0");
-      const mm = String(t.getMinutes()).padStart(2, "0");
-      const ss = String(t.getSeconds()).padStart(2, "0");
-
-      let suffix = "";
-      if (typeof data !== "undefined") {
-        suffix =
-          " " +
-          (typeof data === "string"
-            ? data
-            : JSON.stringify(data, (_, v) => (typeof v === "bigint" ? v.toString() : v), 2));
-      }
-
-      setDebugLines((prev) => [...prev, `[${hh}:${mm}:${ss}] ${message}${suffix}`].slice(-400));
-
-      // eslint-disable-next-line no-console
-      console.log(`[GetStarted] ${message}`, data ?? "");
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  async function debugFetch(url: string, init: RequestInit, label: string) {
-    dbg(`fetch:start:${label}`, {
-      url,
-      method: init.method,
-      body: typeof init.body === "string" ? init.body : undefined,
-    });
-
-    const started = performance.now();
-    let res: Response;
-
-    try {
-      res = await fetch(url, init);
-    } catch (e: any) {
-      dbg(`fetch:network_error:${label}`, { message: e?.message || String(e) });
-      throw e;
-    }
-
-    const ms = Math.round(performance.now() - started);
-
-    try {
-      const txt = await res.clone().text();
-      dbg(`fetch:done:${label}`, { status: res.status, ok: res.ok, ms, body: txt.slice(0, 2000) });
-    } catch {
-      dbg(`fetch:done:${label}`, { status: res.status, ok: res.ok, ms, body: "<unreadable>" });
-    }
-
-    return res;
-  }
-
-  const debugSnapshot = useMemo(() => {
-    let finalizeFlag: string | null = null;
-    let onboardingRaw: string | null = null;
-
-    try {
-      finalizeFlag = sessionStorage.getItem(FINALIZE_FLAG);
-    } catch {}
-    try {
-      onboardingRaw = localStorage.getItem("brilliem_onboarding");
-    } catch {}
-
-    return {
-      origin: typeof window !== "undefined" ? window.location.origin : null,
-      href: typeof window !== "undefined" ? window.location.href : null,
-      hostname: typeof window !== "undefined" ? window.location.hostname : null,
-      localStorageKeys: (() => { try { return Object.keys(localStorage); } catch { return []; } })(),
-      sessionStorageKeys: (() => { try { return Object.keys(sessionStorage); } catch { return []; } })(),
-      mode,
-      signupStep,
-      hydrated,
-      tier,
-      paid,
-      userLoaded,
-      userId: user?.id ?? null,
-      email,
-      firstName,
-      lastName,
-      storedPaymentMethodId,
-      cardReady,
-      clientSecretPresent: !!clientSecret,
-      subscriptionId,
-      finalizeFlag,
-      onboardingRaw: onboardingRaw ? onboardingRaw.slice(0, 1000) : null,
-      stripeLoaded: !!stripeRef.current,
-      stripePkPresent: !!process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY,
-    };
-  }, [
-    mode,
-    signupStep,
-    hydrated,
-    tier,
-    paid,
-    userLoaded,
-    user,
-    email,
-    firstName,
-    lastName,
-    storedPaymentMethodId,
-    cardReady,
-    clientSecret,
-    subscriptionId,
-  ]);
-
-  useEffect(() => {
-    dbg("mount", { mode });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  // ---- /DEBUG ----
-
   async function ensureStripeLoaded() {
-    dbg("stripe:ensureStripeLoaded");
     const pk = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY;
-    dbg("stripe:publishableKeyPresent", { present: !!pk });
     if (!pk) throw new Error("Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY");
 
     if (stripeRef.current) return stripeRef.current;
 
     const stripe = await loadStripe(pk);
-    dbg("stripe:loadStripe:returned", { ok: !!stripe });
     if (!stripe) throw new Error("Stripe failed to load");
     stripeRef.current = stripe;
     return stripe;
   }
 
   async function ensureStripeAndCardMounted() {
-    dbg("card:ensureStripeAndCardMounted:enter", { paid, hasMountEl: !!cardMountRef.current });
-    if (!paid) {
-      dbg("card:skip:notPaid");
-      return;
-    }
-    if (!cardMountRef.current) {
-      dbg("card:skip:noMountRef");
-      return;
-    }
+    if (!paid) return;
+    if (!cardMountRef.current) return;
 
     // Always ensure stripe is loaded
     const stripe = await ensureStripeLoaded();
@@ -369,21 +214,16 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
       return;
     }
 
-    dbg("card:ensureStripeAndCardMounted:trigger", { tier, paid });
-    ensureStripeAndCardMounted().catch((e: any) => {
-      dbg("card:ensureStripeAndCardMounted:error", { message: e?.message || String(e) });
-      setError(e?.message || "Could not load card field.");
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    ensureStripeAndCardMounted().catch((e: any) =>
+      setError(e?.message || "Could not load card field.")
+    );
   }, [tier, paid]);
 
   // Keep optional fields (+ tier + paymentMethodId) across verify -> onboarding
   useEffect(() => {
-    dbg("finalize:effect:enter", { mode, hydrated, tier, storedPaymentMethodId });
     if (mode !== "onboarding") return;
     try {
       const raw = localStorage.getItem("brilliem_onboarding");
-      dbg("hydrate:onboardingRaw", { raw: raw ? raw.slice(0, 1000) : null });
       if (!raw) return;
       const data = JSON.parse(raw);
 
@@ -398,7 +238,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         setTier(data.tier);
       if (typeof data.paymentMethodId === "string") setStoredPaymentMethodId(data.paymentMethodId);
 
-      // localStorage.removeItem("brilliem_onboarding"); // keep for debugging
+      // NOTE: do not clear brilliem_onboarding here; it is used to complete post-verify finalization.
     } catch {
       // ignore
     } finally {
@@ -407,7 +247,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   }, [mode, hydrated, tier, storedPaymentMethodId]);
 
   async function saveProfile(desiredTier: Tier) {
-    const res = await debugFetch("/api/onboarding", {
+    const res = await fetch("/api/onboarding", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -420,32 +260,28 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         province,
         country,
       }),
-    }, "onboarding");
+    });
     if (!res.ok) throw new Error("Failed to save profile.");
   }
 
     async function ensureSubscriptionIntent(paymentMethodId: string): Promise<{ clientSecret: string; subscriptionId: string }> {
-    dbg("stripe:ensureSubscriptionIntent:enter", { tier, paid, hasExisting: !!(clientSecret && subscriptionId), paymentMethodId });
     if (!paid) throw new Error("No paid plan selected.");
 
     // Reuse existing intent for the current flow
     if (clientSecret && subscriptionId) return { clientSecret, subscriptionId };
 
-    const res = await debugFetch("/api/stripe/subscription-intent", {
+    const res = await fetch("/api/stripe/subscription-intent", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
       body: JSON.stringify({ tier, paymentMethodId }),
-    }, "subscription-intent");
+    });
 
     const data = (await res.json().catch(() => ({}))) as {
       clientSecret?: string;
       subscriptionId?: string;
       message?: string;
     };
-
-    dbg("stripe:subscription-intent:json", data);
-
 
     if (!res.ok) {
       throw new Error(data?.message || `Could not initialize subscription (${res.status}).`);
@@ -461,7 +297,6 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
 
 
   async function doSignUp() {
-    dbg("clerk:doSignUp:start", { paid, tier });
     setError(null);
 
     if (!signUpLoaded || !signUp) return;
@@ -506,19 +341,6 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         })
       );
 
-      // DEBUG: confirm onboarding data is actually present in this origin
-      try {
-        const raw2 = localStorage.getItem("brilliem_onboarding");
-        dbg("storage:afterSetOnboarding", {
-          origin: window.location.origin,
-          href: window.location.href,
-          present: !!raw2,
-          len: raw2 ? raw2.length : 0,
-          localKeys: Object.keys(localStorage),
-          sessionKeys: Object.keys(sessionStorage),
-        });
-      } catch {}
-
       setSignupStep("verify");
     } catch (err: any) {
       const msg =
@@ -533,7 +355,6 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   }
 
   async function doVerify() {
-    dbg("clerk:doVerify:start", { verifyCodeLength: verifyCode.length, paid, tier });
     setError(null);
     if (!signUpLoaded || !signUp) return;
 
@@ -547,18 +368,12 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         // After we become signed-in, we want to auto-finalize the selected tier + payment (if any).
         // We do this on the next render in onboarding mode.
         sessionStorage.setItem(FINALIZE_FLAG, "1");
-      try { localStorage.setItem(FINALIZE_FLAG, "1"); } catch {}
-      try {
-        dbg("storage:setFinalizeFlag", {
-          origin: window.location.origin,
-          href: window.location.href,
-          session: sessionStorage.getItem(FINALIZE_FLAG),
-          local: (() => { try { return localStorage.getItem(FINALIZE_FLAG); } catch { return null; } })(),
-        });
-      } catch {}
+        localStorage.setItem(FINALIZE_FLAG, "1");
 
-        // Hard navigate so the server definitely re-evaluates auth() and switches the page to onboarding mode.
-        window.location.assign("/get-started?postVerify=1");
+        // Navigate to onboarding mode and refresh so the server re-evaluates auth().
+        // We avoid a hard navigation so we don't accidentally lose sessionStorage in edge cases.
+        router.replace("/get-started?postVerify=1");
+        router.refresh();
         return;
       }
       setError("Verification incomplete. Please try again.");
@@ -574,44 +389,35 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   }
 
   async function confirmAndActivatePaidPlan() {
-    dbg("stripe:confirmAndActivatePaidPlan:enter", { tier, paid, storedPaymentMethodId, cardReady });
-    if (!paid) {
-      dbg("card:skip:notPaid");
-      return;
-    }
+    if (!paid) return;
 
     const stripe = await ensureStripeLoaded();
 
     // Use stored payment method if we already created it during signup,
     // otherwise create it from the card field now.
     let pmId = storedPaymentMethodId;
-    dbg("stripe:pm:start", { pmId });
     if (!pmId) {
       if (!cardReady) throw new Error("Please enter your card details.");
       pmId = await createPaymentMethodId();
-      dbg("stripe:pm:created", { pmId });
       setStoredPaymentMethodId(pmId);
     }
 
     // Ensure server-side subscription exists (returns PaymentIntent client secret)
         const { clientSecret: cs, subscriptionId: subId } = await ensureSubscriptionIntent(pmId);
-    dbg("stripe:subscription-intent:received", { hasClientSecret: !!cs, subscriptionId: subId });
 
 // Pay the first invoice for the subscription
-    dbg("stripe:confirmCardPayment:start", { hasClientSecret: !!cs, pmId });
     const result = await stripe.confirmCardPayment(cs, {
       payment_method: pmId,
     });
-    dbg("stripe:confirmCardPayment:result", result);
 
     if (result.error) throw new Error(result.error.message || "Payment failed.");
 
     // After payment confirmation, activate tier in Clerk (your existing endpoint)
-    const res = await debugFetch("/api/stripe/activate", {
+    const res = await fetch("/api/stripe/activate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ subscriptionId: subId, tier }),
-    }, "activate");
+    });
 
     if (!res.ok) {
       const txt = await res.text();
@@ -621,42 +427,26 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
 
   // Auto-finalize immediately after email verification completes and we arrive in onboarding mode.
   useEffect(() => {
-    dbg("finalize:effect:enter", { mode, hydrated, tier, storedPaymentMethodId });
     if (mode !== "onboarding") return;
 
     const shouldFinalize =
       sessionStorage.getItem(FINALIZE_FLAG) === "1" ||
-      (() => {
-        try {
-          return localStorage.getItem(FINALIZE_FLAG) === "1";
-        } catch {
-          return false;
-        }
-      })();
-    dbg("finalize:flag", {
-      shouldFinalize,
-      session: (() => { try { return sessionStorage.getItem(FINALIZE_FLAG); } catch { return null; } })(),
-      local: (() => { try { return localStorage.getItem(FINALIZE_FLAG); } catch { return null; } })(),
-    });
+      localStorage.getItem(FINALIZE_FLAG) === "1";
     if (!shouldFinalize) return;
 
     // Wait until we have hydrated tier/paymentMethodId from localStorage (set in signup step).
-    if (!hydrated) {
-      dbg("finalize:wait:notHydrated");
-      return;
-    }
+    if (!hydrated) return;
+
+    // Wait until Clerk session is fully established; otherwise /api/* routes will 401.
+    if (!userLoaded || !user?.id) return;
 
     // If they picked a paid tier during signup, we expect a stored PaymentMethod.
     if (tier !== "free" && !storedPaymentMethodId) {
-      dbg("finalize:missingPaymentMethodId", { tier });
-      sessionStorage.removeItem(FINALIZE_FLAG);
-      try { localStorage.removeItem(FINALIZE_FLAG); } catch {}
       setError("We couldn't find your saved card details. Please re-enter your card and try again.");
       return;
     }
 
     sessionStorage.removeItem(FINALIZE_FLAG);
-      try { localStorage.removeItem(FINALIZE_FLAG); } catch {}
 
     (async () => {
       try {
@@ -673,6 +463,15 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
 
         await confirmAndActivatePaidPlan();
 
+        // Clear one-time finalize markers only after success.
+        try {
+          sessionStorage.removeItem(FINALIZE_FLAG);
+        } catch {}
+        try {
+          localStorage.removeItem(FINALIZE_FLAG);
+          localStorage.removeItem("brilliem_onboarding");
+        } catch {}
+
         router.push("/dashboard");
         router.refresh();
       } catch (e: any) {
@@ -681,11 +480,9 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         setBusy(false);
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, hydrated, tier, storedPaymentMethodId, paid]);
+  }, [mode, hydrated, tier, storedPaymentMethodId, paid, userLoaded, user?.id]);
 
   async function onPrimaryClick() {
-    dbg("ui:primaryClick", debugSnapshot);
     setError(null);
 
     try {
@@ -705,6 +502,15 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
       await saveProfile(tier);
 
       if (!paid) {
+        // Clear one-time finalize markers only after success.
+        try {
+          sessionStorage.removeItem(FINALIZE_FLAG);
+        } catch {}
+        try {
+          localStorage.removeItem(FINALIZE_FLAG);
+          localStorage.removeItem("brilliem_onboarding");
+        } catch {}
+
         router.push("/dashboard");
         router.refresh();
         return;
@@ -882,81 +688,62 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
             >
               {busy ? "Please wait…" : primaryLabel}
             </button>
+
+          {/* Debug panel (shows automatically after postVerify, or add ?debug=1) */}
+          {(() => {
+            if (typeof window === "undefined") return null;
+            const sp = new URLSearchParams(window.location.search);
+            const show = sp.has("debug") || sp.has("postVerify");
+            if (!show) return null;
+
+            let finalizeSession: string | null = null;
+            let finalizeLocal: string | null = null;
+            let onboardingRaw: string | null = null;
+            try {
+              finalizeSession = sessionStorage.getItem(FINALIZE_FLAG);
+            } catch {}
+            try {
+              finalizeLocal = localStorage.getItem(FINALIZE_FLAG);
+              onboardingRaw = localStorage.getItem("brilliem_onboarding");
+            } catch {}
+
+            const snap = {
+              origin: window.location.origin,
+              href: window.location.href,
+              mode,
+              hydrated,
+              tier,
+              paid,
+              userLoaded,
+              userId: user?.id || null,
+              email,
+              firstName,
+              lastName,
+              storedPaymentMethodId,
+              cardReady,
+              stripePkPresent: Boolean(process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY),
+              stripeLoaded: Boolean(stripeRef.current),
+              finalizeFlagSession: finalizeSession,
+              finalizeFlagLocal: finalizeLocal,
+              onboardingRawPresent: Boolean(onboardingRaw),
+              onboardingRawLen: onboardingRaw ? onboardingRaw.length : 0,
+              error,
+              busy,
+            };
+
+            return (
+              <details className="mt-6 rounded-3xl border border-slate-200 bg-white p-4 text-sm">
+                <summary className="cursor-pointer font-semibold text-slate-900">Debug</summary>
+                <pre className="mt-3 whitespace-pre-wrap break-words rounded-2xl bg-slate-950 p-3 text-xs text-slate-100">
+                  {JSON.stringify(snap, null, 2)}
+                </pre>
+              </details>
+            );
+          })()}
+
           </div>
         </div>
       </div>
-
-        {/* Debug panel (temporary) */}
-        <section className="mt-10 rounded-2xl border border-slate-200 bg-white p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="font-semibold text-slate-900">Debug</div>
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() => setDebugOpen((v) => !v)}
-                className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"
-              >
-                {debugOpen ? "Hide" : "Show"}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setDebugLines([]);
-                  dbg("debug:cleared");
-                }}
-                className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"
-              >
-                Clear logs
-              </button>
-              <button
-                type="button"
-                onClick={async () => {
-                  try {
-                    const text = debugLines.join("\n");
-                    await navigator.clipboard.writeText(text);
-                    dbg("debug:copiedToClipboard", { chars: text.length });
-                  } catch (e: any) {
-                    dbg("debug:copyFailed", { message: e?.message || String(e) });
-                  }
-                }}
-                className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"
-              >
-                Copy logs
-              </button>
-              <button
-                onClick={() => {
-                  try {
-                    localStorage.removeItem(DEBUG_PERSIST_KEY);
-                  } catch {}
-                  setDebugLines([]);
-                  dbg("debug:clearedPersistedLogs");
-                }}
-                className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"
-              >
-                Clear logs
-              </button>
-            </div>
-          </div>
-
-          {debugOpen && (
-            <div className="mt-4 grid gap-4">
-              <div>
-                <div className="mb-2 text-sm font-medium text-slate-700">Snapshot</div>
-                <pre className="max-h-72 overflow-auto rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs leading-relaxed text-slate-800">
-{JSON.stringify(debugSnapshot, null, 2)}
-                </pre>
-              </div>
-
-              <div>
-                <div className="mb-2 text-sm font-medium text-slate-700">Log</div>
-                <pre className="max-h-96 overflow-auto rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs leading-relaxed text-slate-800">
-{debugLines.length ? debugLines.join("\n") : "No logs yet."}
-                </pre>
-              </div>
-            </div>
-          )}
-        </section>
-
     </main>
   );
 }
