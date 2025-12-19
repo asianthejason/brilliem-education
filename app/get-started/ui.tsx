@@ -75,9 +75,15 @@ function Field({
 
 const FINALIZE_FLAG = "brilliem_finalize_after_verify";
 
-export function GetStartedClient({ mode }: { mode: Mode }) {
+export function GetStartedClient({ mode: initialMode }: { mode: Mode }) {
   const router = useRouter();
   const { user, isLoaded: userLoaded } = useUser();
+
+  // IMPORTANT: derive the effective mode from the *client* session too.
+  // This prevents getting stuck in "signup" UI after Clerk signs the user in,
+  // even if the Server Component prop hasn’t refreshed yet.
+  const mode: Mode = userLoaded && user?.id ? "onboarding" : initialMode;
+
   const { isLoaded: signUpLoaded, signUp, setActive } = useSignUp();
 
   // Required fields
@@ -217,6 +223,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
     ensureStripeAndCardMounted().catch((e: any) =>
       setError(e?.message || "Could not load card field.")
     );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tier, paid]);
 
   // Keep optional fields (+ tier + paymentMethodId) across verify -> onboarding
@@ -238,7 +245,7 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         setTier(data.tier);
       if (typeof data.paymentMethodId === "string") setStoredPaymentMethodId(data.paymentMethodId);
 
-      // NOTE: do not clear brilliem_onboarding here; it is used to complete post-verify finalization.
+      localStorage.removeItem("brilliem_onboarding");
     } catch {
       // ignore
     } finally {
@@ -368,12 +375,9 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         // After we become signed-in, we want to auto-finalize the selected tier + payment (if any).
         // We do this on the next render in onboarding mode.
         sessionStorage.setItem(FINALIZE_FLAG, "1");
-        localStorage.setItem(FINALIZE_FLAG, "1");
 
-        // Navigate to onboarding mode and refresh so the server re-evaluates auth().
-        // We avoid a hard navigation so we don't accidentally lose sessionStorage in edge cases.
-        router.replace("/get-started?postVerify=1");
-        router.refresh();
+        // Hard navigate so the server definitely re-evaluates auth() and switches the page to onboarding mode.
+        window.location.assign("/get-started?postVerify=1");
         return;
       }
       setError("Verification incomplete. Please try again.");
@@ -429,19 +433,15 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
   useEffect(() => {
     if (mode !== "onboarding") return;
 
-    const shouldFinalize =
-      sessionStorage.getItem(FINALIZE_FLAG) === "1" ||
-      localStorage.getItem(FINALIZE_FLAG) === "1";
+    const shouldFinalize = sessionStorage.getItem(FINALIZE_FLAG) === "1";
     if (!shouldFinalize) return;
 
     // Wait until we have hydrated tier/paymentMethodId from localStorage (set in signup step).
     if (!hydrated) return;
 
-    // Wait until Clerk session is fully established; otherwise /api/* routes will 401.
-    if (!userLoaded || !user?.id) return;
-
     // If they picked a paid tier during signup, we expect a stored PaymentMethod.
     if (tier !== "free" && !storedPaymentMethodId) {
+      sessionStorage.removeItem(FINALIZE_FLAG);
       setError("We couldn't find your saved card details. Please re-enter your card and try again.");
       return;
     }
@@ -463,15 +463,6 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
 
         await confirmAndActivatePaidPlan();
 
-        // Clear one-time finalize markers only after success.
-        try {
-          sessionStorage.removeItem(FINALIZE_FLAG);
-        } catch {}
-        try {
-          localStorage.removeItem(FINALIZE_FLAG);
-          localStorage.removeItem("brilliem_onboarding");
-        } catch {}
-
         router.push("/dashboard");
         router.refresh();
       } catch (e: any) {
@@ -480,7 +471,8 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
         setBusy(false);
       }
     })();
-  }, [mode, hydrated, tier, storedPaymentMethodId, paid, userLoaded, user?.id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, hydrated, tier, storedPaymentMethodId]);
 
   async function onPrimaryClick() {
     setError(null);
@@ -502,15 +494,6 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
       await saveProfile(tier);
 
       if (!paid) {
-        // Clear one-time finalize markers only after success.
-        try {
-          sessionStorage.removeItem(FINALIZE_FLAG);
-        } catch {}
-        try {
-          localStorage.removeItem(FINALIZE_FLAG);
-          localStorage.removeItem("brilliem_onboarding");
-        } catch {}
-
         router.push("/dashboard");
         router.refresh();
         return;
@@ -688,59 +671,6 @@ export function GetStartedClient({ mode }: { mode: Mode }) {
             >
               {busy ? "Please wait…" : primaryLabel}
             </button>
-
-          {/* Debug panel (shows automatically after postVerify, or add ?debug=1) */}
-          {(() => {
-            if (typeof window === "undefined") return null;
-            const sp = new URLSearchParams(window.location.search);
-            const show = sp.has("debug") || sp.has("postVerify");
-            if (!show) return null;
-
-            let finalizeSession: string | null = null;
-            let finalizeLocal: string | null = null;
-            let onboardingRaw: string | null = null;
-            try {
-              finalizeSession = sessionStorage.getItem(FINALIZE_FLAG);
-            } catch {}
-            try {
-              finalizeLocal = localStorage.getItem(FINALIZE_FLAG);
-              onboardingRaw = localStorage.getItem("brilliem_onboarding");
-            } catch {}
-
-            const snap = {
-              origin: window.location.origin,
-              href: window.location.href,
-              mode,
-              hydrated,
-              tier,
-              paid,
-              userLoaded,
-              userId: user?.id || null,
-              email,
-              firstName,
-              lastName,
-              storedPaymentMethodId,
-              cardReady,
-              stripePkPresent: Boolean(process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY),
-              stripeLoaded: Boolean(stripeRef.current),
-              finalizeFlagSession: finalizeSession,
-              finalizeFlagLocal: finalizeLocal,
-              onboardingRawPresent: Boolean(onboardingRaw),
-              onboardingRawLen: onboardingRaw ? onboardingRaw.length : 0,
-              error,
-              busy,
-            };
-
-            return (
-              <details className="mt-6 rounded-3xl border border-slate-200 bg-white p-4 text-sm">
-                <summary className="cursor-pointer font-semibold text-slate-900">Debug</summary>
-                <pre className="mt-3 whitespace-pre-wrap break-words rounded-2xl bg-slate-950 p-3 text-xs text-slate-100">
-                  {JSON.stringify(snap, null, 2)}
-                </pre>
-              </details>
-            );
-          })()}
-
           </div>
         </div>
       </div>
