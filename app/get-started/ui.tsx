@@ -462,7 +462,8 @@ export function GetStartedClient({ mode = "signup" as Mode }: { mode?: Mode }) {
           </div>
 
           <div className="mt-4 rounded-xl border border-white/10 bg-black/20 p-4">
-            <div ref={(el) => (paymentHostRef.current = el)} />
+            <div ref={(el) => { paymentHostRef.current = el; }} />
+
           </div>
 
           <button
