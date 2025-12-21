@@ -213,16 +213,29 @@ export default function SubscriptionPage() {
     setError(null);
     setInfo(null);
     try {
-      await user.update({
-        unsafeMetadata: {
-          ...(user.unsafeMetadata || {}),
-          tier: "free",
-        },
+      // Server-side endpoint cancels any existing Stripe subscription (if present)
+      // and then updates Clerk metadata to tier=free.
+      const res = await fetch("/api/stripe/set-tier", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tier: "free" }),
       });
-      setInfo("Plan updated.");
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(text || "Failed to switch to Free tier");
+      }
+
+      // If user had a payment element open, clear it.
+      clearPaymentState();
+
+      setInfo("Subscription canceled. You're now on the Free tier.");
       await refreshClerkTier("free");
+
+      // Full refresh to ensure UI + server components reflect the new tier immediately.
+      hardRefreshSelf("success=1");
     } catch (e: any) {
-      setError(e?.errors?.[0]?.message || e?.message || "Failed to update tier");
+      setError(e?.errors?.[0]?.message || e?.message || "Failed to switch to Free tier");
     } finally {
       setBusy(false);
     }
