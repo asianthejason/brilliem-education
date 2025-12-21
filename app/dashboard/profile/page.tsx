@@ -64,7 +64,7 @@ export default async function ProfilePage() {
           </div>
 
           <a
-            href="/dashboard"
+            href="/dashboard/subscription"
             className="mt-4 inline-flex w-full items-center justify-center rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white hover:bg-slate-800"
           >
             Manage subscription
