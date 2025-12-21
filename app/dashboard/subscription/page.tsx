@@ -49,14 +49,32 @@ function tierLabel(tier: Tier) {
   return "Lessons + AI Tutor";
 }
 
+function tierRank(tier: Tier) {
+  if (tier === "lessons_ai") return 2;
+  if (tier === "lessons") return 1;
+  if (tier === "free") return 0;
+  return -1;
+}
+
+function formatDate(tsSeconds?: number | null) {
+  if (!tsSeconds) return null;
+  try {
+    const d = new Date(tsSeconds * 1000);
+    return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  } catch {
+    return null;
+  }
+}
+
 export default function SubscriptionPage() {
   const router = useRouter();
   const params = useSearchParams();
   const { user, isLoaded } = useUser();
 
-  // Keep an "optimistic" tier locally so UI updates immediately after a successful change,
-  // even if Clerk metadata propagation takes a moment.
   const [currentTier, setCurrentTier] = useState<Tier>("none");
+  const [pendingTier, setPendingTier] = useState<Tier | null>(null);
+  const [pendingEffective, setPendingEffective] = useState<number | null>(null);
+
   const grade = (user?.unsafeMetadata?.gradeLevel as string) || "Not set yet";
 
   const [busy, setBusy] = useState(false);
@@ -76,11 +94,16 @@ export default function SubscriptionPage() {
   const publishableKey = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY;
   const canPay = useMemo(() => !!publishableKey, [publishableKey]);
 
-  // Initialize local tier from Clerk user
+  // Initialize local tier(s) from Clerk user
   useEffect(() => {
     const t = ((user?.unsafeMetadata?.tier as Tier) || "none") as Tier;
     setCurrentTier(t);
-  }, [user?.unsafeMetadata?.tier]);
+
+    const pt = (user?.unsafeMetadata?.pendingTier as Tier | undefined) || null;
+    const pe = (user?.unsafeMetadata?.pendingTierEffective as number | undefined) || null;
+    setPendingTier(pt);
+    setPendingEffective(pe);
+  }, [user?.unsafeMetadata?.tier, user?.unsafeMetadata?.pendingTier, user?.unsafeMetadata?.pendingTierEffective]);
 
   // Load Stripe once (client)
   useEffect(() => {
@@ -131,10 +154,16 @@ export default function SubscriptionPage() {
     try {
       if (!user) return;
       const reloaded = await user.reload();
+
       const t = ((reloaded?.unsafeMetadata?.tier as Tier) || optimistic || "none") as Tier;
       setCurrentTier(t);
+
+      const pt = (reloaded?.unsafeMetadata?.pendingTier as Tier | undefined) || null;
+      const pe = (reloaded?.unsafeMetadata?.pendingTierEffective as number | undefined) || null;
+      setPendingTier(pt);
+      setPendingEffective(pe);
     } catch {
-      // If reload fails, keep optimistic tier.
+      // keep optimistic tier
     } finally {
       router.refresh();
     }
@@ -143,8 +172,19 @@ export default function SubscriptionPage() {
   function hardRefreshSelf(query?: string) {
     const base = "/dashboard/subscription";
     const url = query ? `${base}?${query}` : base;
-    // Full refresh ensures all server components + Clerk session metadata are current
     window.location.assign(url);
+  }
+
+  async function finalizeActivation(input: { subscriptionId: string; tier: PaidTier }) {
+    const res = await fetch("/api/stripe/activate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(text || "Failed to activate subscription");
+    }
   }
 
   // Handle returning from a bank-required redirect (3DS)
@@ -174,12 +214,13 @@ export default function SubscriptionPage() {
         if (paymentIntent?.status === "succeeded" || paymentIntent?.status === "processing") {
           await finalizeActivation({ subscriptionId: sid, tier: t });
 
-          // Update UI immediately + refresh Clerk metadata
           clearPaymentState();
+          setPendingTier(null);
+          setPendingEffective(null);
+
           setInfo("Payment successful! Your subscription is active.");
           await refreshClerkTier(t);
 
-          // Force a full page refresh so "Current tier" and "Current" badge are always correct.
           hardRefreshSelf("success=1");
         } else {
           setError(`Payment not completed (status: ${paymentIntent?.status || "unknown"})`);
@@ -195,27 +236,13 @@ export default function SubscriptionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params]);
 
-  async function finalizeActivation(input: { subscriptionId: string; tier: PaidTier }) {
-    const res = await fetch("/api/stripe/activate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(text || "Failed to activate subscription");
-    }
-  }
-
   async function setFreeTier() {
     if (!user) return;
     setBusy(true);
     setError(null);
     setInfo(null);
     try {
-      // Server-side endpoint cancels any existing Stripe subscription (if present)
-      // and then updates Clerk metadata to tier=free.
-      const res = await fetch("/api/stripe/set-tier", {
+      const res = await fetch("/api/stripe/change-tier", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tier: "free" }),
@@ -226,16 +253,102 @@ export default function SubscriptionPage() {
         throw new Error(text || "Failed to switch to Free tier");
       }
 
-      // If user had a payment element open, clear it.
+      const data = (await res.json()) as
+        | { mode: "free_immediate" }
+        | { mode: "downgrade_scheduled"; effectiveDate: number };
+
       clearPaymentState();
 
-      setInfo("Subscription canceled. You're now on the Free tier.");
-      await refreshClerkTier("free");
+      if (data.mode === "downgrade_scheduled") {
+        setPendingTier("free");
+        setPendingEffective(data.effectiveDate);
 
-      // Full refresh to ensure UI + server components reflect the new tier immediately.
-      hardRefreshSelf("success=1");
+        const d = formatDate(data.effectiveDate);
+        setInfo(`Downgrade scheduled. You’ll switch to Free on ${d || "your next renewal date"}.`);
+
+        await refreshClerkTier();
+        hardRefreshSelf("scheduled=1");
+      } else {
+        setPendingTier(null);
+        setPendingEffective(null);
+
+        setInfo("You’re now on the Free tier.");
+        await refreshClerkTier("free");
+        hardRefreshSelf("success=1");
+      }
     } catch (e: any) {
       setError(e?.errors?.[0]?.message || e?.message || "Failed to switch to Free tier");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function changePaidTier(nextTier: PaidTier) {
+    if (!user) return;
+    if (nextTier === currentTier) return;
+
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+
+    try {
+      const res = await fetch("/api/stripe/change-tier", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tier: nextTier }),
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(text || "Failed to change plan");
+      }
+
+      const data = (await res.json()) as
+        | { mode: "upgraded"; amountDue?: number; currency?: string }
+        | { mode: "payment_required"; subscriptionId: string; clientSecret: string; amountDue?: number; currency?: string }
+        | { mode: "downgrade_scheduled"; effectiveDate: number };
+
+      if (data.mode === "downgrade_scheduled") {
+        setPendingTier(nextTier);
+        setPendingEffective(data.effectiveDate);
+
+        const d = formatDate(data.effectiveDate);
+        setInfo(`Downgrade scheduled. You’ll switch on ${d || "your next renewal date"}.`);
+
+        await refreshClerkTier();
+        hardRefreshSelf("scheduled=1");
+        return;
+      }
+
+      if (data.mode === "payment_required") {
+        setSubscriptionId(data.subscriptionId);
+        setClientSecret(data.clientSecret);
+        setTargetTier(nextTier);
+
+        if (typeof data.amountDue === "number") {
+          const dollars = (data.amountDue / 100).toFixed(2);
+          setInfo(`Upgrade requires a prorated payment of $${dollars} ${data.currency?.toUpperCase() || ""}.`);
+        } else {
+          setInfo("Upgrade requires a prorated payment. Please complete payment below.");
+        }
+        return;
+      }
+
+      // Upgraded successfully (Stripe auto-paid the proration invoice with saved method)
+      setPendingTier(null);
+      setPendingEffective(null);
+
+      if (typeof data.amountDue === "number" && data.amountDue > 0) {
+        const dollars = (data.amountDue / 100).toFixed(2);
+        setInfo(`Upgraded! Prorated charge: $${dollars} ${data.currency?.toUpperCase() || ""}.`);
+      } else {
+        setInfo("Upgraded!");
+      }
+
+      await refreshClerkTier(nextTier);
+      hardRefreshSelf("success=1");
+    } catch (e: any) {
+      setError(e?.message || "Could not change plan");
     } finally {
       setBusy(false);
     }
@@ -247,15 +360,18 @@ export default function SubscriptionPage() {
     setInfo(null);
     try {
       if (!canPay) throw new Error("Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY");
+
       const res = await fetch("/api/stripe/subscription-intent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tier: nextTier }),
       });
+
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         throw new Error(text || "Failed to start subscription");
       }
+
       const data = (await res.json()) as { subscriptionId: string; clientSecret: string };
       setSubscriptionId(data.subscriptionId);
       setClientSecret(data.clientSecret);
@@ -292,23 +408,20 @@ export default function SubscriptionPage() {
 
       if (result.error) throw new Error(result.error.message || "Payment failed");
 
-      // If no redirect was required, we can finalize immediately
       const status = result.paymentIntent?.status;
       if (status === "succeeded" || status === "processing") {
         await finalizeActivation({ subscriptionId, tier: targetTier });
 
         clearPaymentState();
-        setInfo("Payment successful! Your subscription is active.");
+        setPendingTier(null);
+        setPendingEffective(null);
 
-        // Update UI immediately + refresh Clerk metadata
+        setInfo("Payment successful! Your subscription is active.");
         await refreshClerkTier(targetTier);
 
-        // Force a full reload so all tier labels update reliably.
         hardRefreshSelf("success=1");
       } else {
-        setInfo(
-          "Payment submitted. If your bank needs verification, you’ll be returned here automatically."
-        );
+        setInfo("Payment submitted. If your bank needs verification, you’ll be returned here automatically.");
       }
     } catch (e: any) {
       setError(e?.message || "Payment failed");
@@ -325,6 +438,13 @@ export default function SubscriptionPage() {
     );
   }
 
+  const pendingText =
+    pendingTier && pendingTier !== currentTier
+      ? `Pending: ${tierLabel(pendingTier)}${
+          pendingEffective ? ` (effective ${formatDate(pendingEffective) || "next billing period"})` : ""
+        }`
+      : null;
+
   return (
     <div className="grid gap-6">
       <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -337,8 +457,10 @@ export default function SubscriptionPage() {
           </div>
 
           <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-700">
-            <span className="font-semibold text-slate-900">Current tier:</span>{" "}
-            {tierLabel(currentTier)}
+            <div>
+              <span className="font-semibold text-slate-900">Current tier:</span> {tierLabel(currentTier)}
+            </div>
+            {pendingText && <div className="mt-1 text-xs text-slate-600">{pendingText}</div>}
           </div>
         </div>
       </div>
@@ -347,9 +469,7 @@ export default function SubscriptionPage() {
         <div
           className={cx(
             "rounded-3xl border p-5 text-sm",
-            error
-              ? "border-red-200 bg-red-50 text-red-900"
-              : "border-blue-200 bg-blue-50 text-blue-900"
+            error ? "border-red-200 bg-red-50 text-red-900" : "border-blue-200 bg-blue-50 text-blue-900"
           )}
         >
           <div className="font-semibold">{error ? "Action required" : "Update"}</div>
@@ -375,20 +495,22 @@ export default function SubscriptionPage() {
         <div className="mt-5 grid gap-4 md:grid-cols-3">
           {TIERS.map((t) => {
             const isCurrent = currentTier === t.id;
-            const hasSelectedTier = currentTier !== "none";
             const isPaid = t.id !== "free";
+            const isScheduled = pendingTier === t.id && !isCurrent;
 
-            const disabled = busy || isCurrent || (isPaid && !canPay);
+            const disabled = busy || isCurrent || isScheduled || (isPaid && !canPay);
 
             const buttonText = isCurrent
               ? "Selected"
-              : busy
-                ? isPaid
-                  ? "Starting…"
-                  : "Saving…"
-                : hasSelectedTier
-                  ? "Change to this plan"
-                  : "Select this plan";
+              : isScheduled
+                ? "Scheduled"
+                : busy
+                  ? isPaid
+                    ? "Starting…"
+                    : "Saving…"
+                  : currentTier !== "none"
+                    ? "Change to this plan"
+                    : "Select this plan";
 
             return (
               <div key={t.id} className="rounded-3xl border border-slate-200 bg-white p-5">
@@ -398,11 +520,15 @@ export default function SubscriptionPage() {
                     <div className="mt-1 text-sm text-slate-600">{t.price}</div>
                   </div>
 
-                  {isCurrent && (
+                  {isCurrent ? (
                     <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-800">
                       Current
                     </span>
-                  )}
+                  ) : isScheduled ? (
+                    <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-900">
+                      Scheduled
+                    </span>
+                  ) : null}
                 </div>
 
                 <ul className="mt-4 space-y-2 text-sm text-slate-700">
@@ -420,6 +546,11 @@ export default function SubscriptionPage() {
                     disabled={disabled}
                     onClick={() => {
                       if (t.id === "free") return void setFreeTier();
+
+                      const currentIsPaid = currentTier === "lessons" || currentTier === "lessons_ai";
+                      const nextIsPaid = t.id === "lessons" || t.id === "lessons_ai";
+
+                      if (currentIsPaid && nextIsPaid) return void changePaidTier(t.id as PaidTier);
                       return void startPaidTier(t.id as PaidTier);
                     }}
                     className={cx(
@@ -430,18 +561,23 @@ export default function SubscriptionPage() {
                     {buttonText}
                   </button>
                 </div>
+
+                {isPaid && currentTier !== "none" && currentTier !== "free" && !isCurrent && !isScheduled && (
+                  <div className="mt-2 text-xs text-slate-500">
+                    {tierRank(t.id) < tierRank(currentTier)
+                      ? "Downgrades take effect next billing period."
+                      : "Upgrades take effect immediately with proration."}
+                  </div>
+                )}
               </div>
             );
           })}
         </div>
 
-        {/* Embedded payment element when user selects a paid tier */}
         {clientSecret && subscriptionId && targetTier && (
           <div className="mt-6 rounded-3xl border border-slate-200 bg-slate-50 p-5">
             <div className="text-sm font-semibold text-slate-900">Payment</div>
-            <div className="mt-1 text-sm text-slate-600">
-              Complete your subscription without leaving this page.
-            </div>
+            <div className="mt-1 text-sm text-slate-600">Complete this payment without leaving the page.</div>
 
             <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
               <div
@@ -460,7 +596,7 @@ export default function SubscriptionPage() {
                 busy ? "bg-slate-300" : "bg-slate-900 hover:bg-slate-800"
               )}
             >
-              {busy ? "Processing…" : "Confirm & Subscribe"}
+              {busy ? "Processing…" : "Confirm & Pay"}
             </button>
 
             <div className="mt-2 text-xs text-slate-500">
