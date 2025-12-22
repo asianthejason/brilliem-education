@@ -161,10 +161,10 @@ export async function POST(req: Request) {
 
       const sched = await stripe.subscriptionSchedules.create({
         from_subscription: subId,
-        end_behavior: "release",
       });
 
       await stripe.subscriptionSchedules.update(sched.id, {
+        end_behavior: "release",
         phases: [
           {
             items: [{ price: String(item.price.id), quantity: item.quantity ?? 1 }],
