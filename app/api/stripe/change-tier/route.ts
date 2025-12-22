@@ -78,7 +78,46 @@ export async function POST(req: Request) {
   const quantity = item.quantity ?? 1;
 
   // Selecting Free = cancel at period end (keep access)
+  // If a subscription schedule already exists (because a downgrade was scheduled),
+  // we MUST update the schedule. Setting cancel_at_period_end while a schedule exists can error,
+  // and it would not remove the already-scheduled phase change.
   if (desired === "free") {
+    const periodEnd = subscription.current_period_end;
+
+    if (subscription.schedule) {
+      const scheduleId =
+        typeof subscription.schedule === "string" ? subscription.schedule : String(subscription.schedule.id);
+
+      const schedule = await stripe.subscriptionSchedules.retrieve(scheduleId);
+
+      // Keep the current phase start date EXACTLY as Stripe set it, or Stripe will error:
+      // "You can not modify the start date of the current phase."
+      const currentPhaseStart = schedule.phases?.[0]?.start_date;
+      if (!currentPhaseStart) return new Response("Subscription schedule has no current phase", { status: 500 });
+
+      await stripe.subscriptionSchedules.update(scheduleId, {
+        end_behavior: "cancel",
+        phases: [
+          {
+            items: [{ price: String(item.price.id), quantity }],
+            start_date: currentPhaseStart,
+            end_date: periodEnd,
+          },
+        ],
+      });
+
+      await updateClerk(userId, {
+        tier: currentTier,
+        pendingTier: "free",
+        pendingTierEffective: periodEnd,
+        stripeSubscriptionStatus: subscription.status,
+        stripeCustomerId: String(subscription.customer),
+        stripeSubscriptionId: subscription.id,
+      });
+
+      return Response.json({ mode: "downgrade_scheduled", effectiveDate: periodEnd });
+    }
+
     const updated = await stripe.subscriptions.update(subId, {
       cancel_at_period_end: true,
     });
