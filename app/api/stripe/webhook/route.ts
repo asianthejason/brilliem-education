@@ -2,22 +2,21 @@ import { headers } from "next/headers";
 import { clerkClient } from "@clerk/nextjs/server";
 import { stripe } from "@/lib/stripe";
 
-function tierFromPriceId(priceId: string | null | undefined) {
-  if (!priceId) return null;
-
+function tierFromPriceId(priceId?: string | null) {
   const lessons =
     process.env.STRIPE_PRICE_LESSONS ||
     process.env.STRIPE_LESSONS_PRICE_ID ||
     process.env.LESSONS_PRICE_ID;
 
   const lessonsAi =
+    process.env.STRIPE_PRICE_LESSONS_AI_TUTOR ||
     process.env.STRIPE_PRICE_LESSONS_AI ||
     process.env.STRIPE_LESSONS_AI_PRICE_ID ||
     process.env.LESSONS_AI_PRICE_ID;
 
   if (lessons && priceId === lessons) return "lessons";
   if (lessonsAi && priceId === lessonsAi) return "lessons_ai";
-  return null;
+  return "free";
 }
 
 export async function POST(req: Request) {
@@ -40,15 +39,14 @@ export async function POST(req: Request) {
     if (event.type === "customer.subscription.updated") {
       const sub = event.data.object as any;
       const clerkUserId = sub?.metadata?.clerkUserId as string | undefined;
-      if (!clerkUserId) return new Response("ok", { status: 200 });
+      if (!clerkUserId) return new Response("ok");
 
       const priceId = sub?.items?.data?.[0]?.price?.id as string | undefined;
-      const derivedTier = tierFromPriceId(priceId) || "free";
+      const derivedTier = tierFromPriceId(priceId);
 
       const user = await client.users.getUser(clerkUserId);
       const meta = (user.unsafeMetadata || {}) as Record<string, any>;
 
-      // If canceled at period end, keep tier but show pending Free
       if (sub.cancel_at_period_end) {
         const nextUnsafe: Record<string, any> = {
           ...meta,
@@ -61,10 +59,9 @@ export async function POST(req: Request) {
         };
         Object.keys(nextUnsafe).forEach((k) => nextUnsafe[k] === undefined && delete nextUnsafe[k]);
         await client.users.updateUser(clerkUserId, { unsafeMetadata: nextUnsafe });
-        return new Response("ok", { status: 200 });
+        return new Response("ok");
       }
 
-      // Otherwise reflect current tier immediately (handles scheduled downgrades after period flips)
       const nextUnsafe: Record<string, any> = {
         ...meta,
         tier: derivedTier,
@@ -77,13 +74,13 @@ export async function POST(req: Request) {
       Object.keys(nextUnsafe).forEach((k) => nextUnsafe[k] === undefined && delete nextUnsafe[k]);
       await client.users.updateUser(clerkUserId, { unsafeMetadata: nextUnsafe });
 
-      return new Response("ok", { status: 200 });
+      return new Response("ok");
     }
 
     if (event.type === "customer.subscription.deleted") {
       const sub = event.data.object as any;
       const clerkUserId = sub?.metadata?.clerkUserId as string | undefined;
-      if (!clerkUserId) return new Response("ok", { status: 200 });
+      if (!clerkUserId) return new Response("ok");
 
       const user = await client.users.getUser(clerkUserId);
       const meta = (user.unsafeMetadata || {}) as Record<string, any>;
@@ -100,10 +97,10 @@ export async function POST(req: Request) {
       Object.keys(nextUnsafe).forEach((k) => nextUnsafe[k] === undefined && delete nextUnsafe[k]);
       await client.users.updateUser(clerkUserId, { unsafeMetadata: nextUnsafe });
 
-      return new Response("ok", { status: 200 });
+      return new Response("ok");
     }
 
-    return new Response("ok", { status: 200 });
+    return new Response("ok");
   } catch (e: any) {
     return new Response(`Webhook handler error: ${e?.message || "unknown"}`, { status: 500 });
   }
