@@ -165,23 +165,18 @@ export async function POST(req: Request) {
     items: [{ id: item.id, price: nextPriceId }],
     proration_behavior: "create_prorations",
     billing_cycle_anchor: "unchanged",
-    payment_behavior: "default_incomplete",
-    expand: ["latest_invoice.payment_intent"],
   });
 
-  // Try to pay any proration invoice immediately (so user sees payment flow if required).
-  let invoice: any = updated.latest_invoice || null;
+  // IMPORTANT: `subscription.update` creates proration adjustments as *pending invoice items*.
+  // If we do nothing, Stripe will add those prorations to the *next* renewal invoice.
+  // To charge the prorated difference immediately, we create/finalize/pay an invoice right now.
+  let invoice = await stripe.invoices.create({
+    customer: String(updated.customer),
+    subscription: updated.id,
+    auto_advance: false,
+  });
 
-  // If Stripe didn't generate an invoice immediately, force one for pending prorations.
-  if (!invoice) {
-    invoice = await stripe.invoices.create({
-      customer: String(updated.customer),
-      subscription: updated.id,
-      auto_advance: true,
-    });
-  }
-
-  // Ensure invoice is finalized so it can be paid.
+  // Finalize so it can be paid.
   if (invoice.status === "draft") {
     invoice = await stripe.invoices.finalizeInvoice(String(invoice.id), {
       expand: ["payment_intent"],
@@ -192,28 +187,22 @@ export async function POST(req: Request) {
 
   const amountDue = typeof invoice.amount_due === "number" ? invoice.amount_due : 0;
   const currency = invoice.currency ? String(invoice.currency) : undefined;
-  const pi = invoice.payment_intent as any | null;
 
-  // If there is money due, attempt to pay now (this will use default PM; may require action).
+  // If there is money due, attempt to pay now (uses the default PM; may require SCA).
   if (amountDue > 0) {
-    // If no payment intent exists yet, pay() will create/attach one.
-    if (!pi) {
-      invoice = await stripe.invoices.pay(String(invoice.id), { expand: ["payment_intent"] });
-    }
+    invoice = await stripe.invoices.pay(String(invoice.id), { expand: ["payment_intent"] });
 
-    const pi2 = (invoice.payment_intent as any | null) || pi;
-
-    if (pi2?.client_secret && pi2?.status && pi2.status !== "succeeded") {
+    const pi = invoice.payment_intent as any | null;
+    if (pi?.client_secret && pi?.status && pi.status !== "succeeded") {
       return Response.json({
         mode: "payment_required",
         subscriptionId: updated.id,
-        clientSecret: String(pi2.client_secret),
+        clientSecret: String(pi.client_secret),
         amountDue,
         currency,
       });
     }
   }
-
   // Success: update Clerk immediately
   await updateClerk(userId, {
     tier: desired,
