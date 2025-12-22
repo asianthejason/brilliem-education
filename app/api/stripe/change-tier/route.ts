@@ -37,16 +37,17 @@ export async function POST(req: Request) {
   const { userId } = await auth();
   if (!userId) return new Response("Unauthorized", { status: 401 });
 
-  const body = (await req.json().catch(() => null)) as { tier?: Tier } | null;
-  const desired = body?.tier;
-  if (!desired) return new Response("Missing tier", { status: 400 });
+  try {
+    const body = (await req.json().catch(() => null)) as { tier?: Tier } | null;
+    const desired = body?.tier;
+    if (!desired) return new Response("Missing tier", { status: 400 });
 
-  const client = await clerkClient();
-  const user = await client.users.getUser(userId);
-  const meta = (user.unsafeMetadata || {}) as Record<string, any>;
+    const client = await clerkClient();
+    const user = await client.users.getUser(userId);
+    const meta = (user.unsafeMetadata || {}) as Record<string, any>;
 
-  const currentTier = ((meta.tier as Tier | undefined) || "free") as Tier;
-  const subId = meta.stripeSubscriptionId as string | undefined;
+    const currentTier = ((meta.tier as Tier | undefined) || "free") as Tier;
+    const subId = meta.stripeSubscriptionId as string | undefined;
 
   // If no Stripe subscription exists yet, only allow Free here.
   if (!subId) {
@@ -65,9 +66,17 @@ export async function POST(req: Request) {
   }
 
   // Fetch subscription (with schedule + invoice info)
-  const subscription = await stripe.subscriptions.retrieve(subId, {
+  let subscription = await stripe.subscriptions.retrieve(subId, {
     expand: ["latest_invoice.payment_intent", "schedule"],
   });
+
+  function getScheduleIdFromSubscription(sub: any): string | null {
+    const s = sub?.schedule;
+    if (!s) return null;
+    if (typeof s === "string") return s;
+    if (typeof s === "object" && s.id) return String(s.id);
+    return null;
+  }
 
   // Defense-in-depth ownership check
   const metaClerkUserId = subscription.metadata?.clerkUserId;
@@ -78,49 +87,20 @@ export async function POST(req: Request) {
   const quantity = item.quantity ?? 1;
 
   // Selecting Free = cancel at period end (keep access)
-  // If a subscription schedule already exists (because a downgrade was scheduled),
-  // we MUST update the schedule. Setting cancel_at_period_end while a schedule exists can error,
-  // and it would not remove the already-scheduled phase change.
   if (desired === "free") {
-    const periodEnd = subscription.current_period_end;
-
-    if (subscription.schedule) {
-      const scheduleId =
-        typeof subscription.schedule === "string" ? subscription.schedule : String(subscription.schedule.id);
-
-      const schedule = await stripe.subscriptionSchedules.retrieve(scheduleId);
-
-      // Keep the current phase start date EXACTLY as Stripe set it, or Stripe will error:
-      // "You can not modify the start date of the current phase."
-      const currentPhaseStart = schedule.phases?.[0]?.start_date;
-      if (!currentPhaseStart) return new Response("Subscription schedule has no current phase", { status: 500 });
-
-      await stripe.subscriptionSchedules.update(scheduleId, {
-        end_behavior: "cancel",
-        phases: [
-          {
-            items: [{ price: String(item.price.id), quantity }],
-            start_date: currentPhaseStart,
-            end_date: periodEnd,
-          },
-        ],
-      });
-
-      await updateClerk(userId, {
-        tier: currentTier,
-        pendingTier: "free",
-        pendingTierEffective: periodEnd,
-        stripeSubscriptionStatus: subscription.status,
-        stripeCustomerId: String(subscription.customer),
-        stripeSubscriptionId: subscription.id,
-      });
-
-      return Response.json({ mode: "downgrade_scheduled", effectiveDate: periodEnd });
+    // If a subscription schedule exists (e.g. from a previously scheduled downgrade),
+    // release it first so the schedule no longer controls future changes.
+    // Then we can cleanly set cancel_at_period_end.
+    const scheduleId = getScheduleIdFromSubscription(subscription);
+    if (scheduleId) {
+      try {
+        await stripe.subscriptionSchedules.release(scheduleId);
+      } catch {
+        // Ignore: schedule may already be released/canceled.
+      }
     }
 
-    const updated = await stripe.subscriptions.update(subId, {
-      cancel_at_period_end: true,
-    });
+    const updated = await stripe.subscriptions.update(subId, { cancel_at_period_end: true });
 
     await updateClerk(userId, {
       tier: currentTier,
@@ -137,17 +117,40 @@ export async function POST(req: Request) {
   // Any paid-tier change should "uncancel" first if the user had scheduled Free.
   if (subscription.cancel_at_period_end) {
     await stripe.subscriptions.update(subId, { cancel_at_period_end: false });
+    // Re-fetch so `cancel_at_period_end` / schedule state is current for the rest of the handler.
+    subscription = await stripe.subscriptions.retrieve(subId, {
+      expand: ["latest_invoice.payment_intent", "schedule"],
+    });
+  }
+
+  // If a schedule exists and we're doing an immediate change (upgrade/lateral),
+  // release the schedule first. Otherwise Stripe may block direct subscription updates.
+  const existingScheduleId = getScheduleIdFromSubscription(subscription);
+  if (existingScheduleId && rank(desired) >= rank(currentTier)) {
+    try {
+      await stripe.subscriptionSchedules.release(existingScheduleId);
+      // Re-fetch so schedule is detached before we do direct subscription updates.
+      subscription = await stripe.subscriptions.retrieve(subId, {
+        expand: ["latest_invoice.payment_intent", "schedule"],
+      });
+    } catch {
+      // Ignore
+    }
   }
 
   // If there is an existing schedule, we will re-use it; otherwise create one.
   // IMPORTANT: When using from_subscription, you cannot set end_behavior at creation.
-  async function getOrCreateScheduleId(): Promise<string> {
-    const existing = subscription.schedule ? String(subscription.schedule) : null;
-    if (existing) return existing;
-
-    const created = await stripe.subscriptionSchedules.create({
-      from_subscription: subId,
-    });
+  async function getOrCreateScheduleIdForDowngrade(): Promise<string> {
+    const existingId = getScheduleIdFromSubscription(subscription);
+    if (existingId) {
+      try {
+        const sch = await stripe.subscriptionSchedules.retrieve(existingId);
+        if (sch?.status === "active" || sch?.status === "not_started") return sch.id;
+      } catch {
+        // Fall through to create.
+      }
+    }
+    const created = await stripe.subscriptionSchedules.create({ from_subscription: subId });
     return created.id;
   }
 
@@ -159,7 +162,7 @@ export async function POST(req: Request) {
 
   // DOWNGRADE: schedule for next billing period, keep current access until then
   if (desiredRank < currentRank) {
-    const scheduleId = await getOrCreateScheduleId();
+    const scheduleId = await getOrCreateScheduleIdForDowngrade();
     const schedule = await stripe.subscriptionSchedules.retrieve(scheduleId);
 
     // Keep the current phase start date EXACTLY as Stripe set it, or Stripe will error:
@@ -252,9 +255,17 @@ export async function POST(req: Request) {
     stripeSubscriptionStatus: updated.status,
   });
 
-  return Response.json({
-    mode: "upgraded",
-    amountDue: amountDue > 0 ? amountDue : undefined,
-    currency,
-  });
+    return Response.json({
+      mode: "upgraded",
+      amountDue: amountDue > 0 ? amountDue : undefined,
+      currency,
+    });
+  } catch (err: any) {
+    const msg =
+      err?.raw?.message ||
+      err?.message ||
+      "Failed to change plan";
+    // Surface a helpful message to the client (your UI shows this text).
+    return new Response(msg, { status: 400 });
+  }
 }
