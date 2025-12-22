@@ -8,6 +8,13 @@ import { loadStripe, type Stripe, type StripeElements } from "@stripe/stripe-js"
 type Tier = "none" | "free" | "lessons" | "lessons_ai";
 type PaidTier = Exclude<Tier, "none" | "free">;
 
+type CardSummary = {
+  brand: string;
+  last4: string;
+  expMonth: number;
+  expYear: number;
+};
+
 const TIERS: Array<{
   id: Tier;
   name: string;
@@ -81,6 +88,17 @@ export default function SubscriptionPage() {
   const [info, setInfo] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Saved payment method (card) display + update flow
+  const [hasStripeCustomer, setHasStripeCustomer] = useState(false);
+  const [savedCard, setSavedCard] = useState<CardSummary | null>(null);
+  const [pmModalOpen, setPmModalOpen] = useState(false);
+  const [pmClientSecret, setPmClientSecret] = useState<string | null>(null);
+  const [pmSetupIntentId, setPmSetupIntentId] = useState<string | null>(null);
+
+  const pmElementsRef = useRef<StripeElements | null>(null);
+  const pmMountedRef = useRef(false);
+  const pmHostRef = useRef<HTMLDivElement | null>(null);
+
   // Payment element state (no @stripe/react-stripe-js needed)
   const [clientSecret, setClientSecret] = useState<string | null>(null);
   const [subscriptionId, setSubscriptionId] = useState<string | null>(null);
@@ -104,6 +122,13 @@ export default function SubscriptionPage() {
     setPendingTier(pt);
     setPendingEffective(pe);
   }, [user?.unsafeMetadata?.tier, user?.unsafeMetadata?.pendingTier, user?.unsafeMetadata?.pendingTierEffective]);
+
+  // Load the currently-saved payment method (masked card), if this user has a Stripe customer.
+  useEffect(() => {
+    if (!isLoaded) return;
+    void fetchSavedCard();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoaded, user?.id]);
 
   // Load Stripe once (client)
   useEffect(() => {
@@ -142,10 +167,65 @@ export default function SubscriptionPage() {
     };
   }, [clientSecret]);
 
+  // Mount Payment Element for payment method updates (SetupIntent)
+  useEffect(() => {
+    const stripe = stripeRef.current;
+    if (!stripe) return;
+    if (!pmModalOpen) return;
+    if (!pmClientSecret) return;
+    if (!pmHostRef.current) return;
+    if (pmMountedRef.current) return;
+
+    const elements = stripe.elements({ clientSecret: pmClientSecret });
+    const paymentElement = elements.create("payment");
+    paymentElement.mount(pmHostRef.current);
+
+    pmElementsRef.current = elements;
+    pmMountedRef.current = true;
+
+    return () => {
+      try {
+        paymentElement.unmount();
+      } catch {}
+      pmElementsRef.current = null;
+      pmMountedRef.current = false;
+    };
+  }, [pmClientSecret, pmModalOpen]);
+
   function clearPaymentState() {
     setClientSecret(null);
     setSubscriptionId(null);
     setTargetTier(null);
+  }
+
+  function clearPaymentMethodUpdate() {
+    setPmClientSecret(null);
+    setPmSetupIntentId(null);
+    setPmModalOpen(false);
+  }
+
+  async function fetchSavedCard() {
+    try {
+      const res = await fetch("/api/stripe/payment-method", { method: "GET" });
+      if (!res.ok) return;
+      const data = (await res.json()) as
+        | { hasCustomer: false; hasPaymentMethod: false }
+        | { hasCustomer: true; hasPaymentMethod: boolean; brand?: string; last4?: string; expMonth?: number; expYear?: number };
+
+      setHasStripeCustomer(!!data.hasCustomer);
+      if (data.hasCustomer && data.hasPaymentMethod && data.brand && data.last4 && data.expMonth && data.expYear) {
+        setSavedCard({
+          brand: data.brand,
+          last4: data.last4,
+          expMonth: data.expMonth,
+          expYear: data.expYear,
+        });
+      } else {
+        setSavedCard(null);
+      }
+    } catch {
+      // ignore
+    }
   }
 
   async function refreshClerkTier(optimistic?: Tier) {
@@ -228,6 +308,46 @@ export default function SubscriptionPage() {
         }
       } catch (e: any) {
         setError(e?.message || "Failed to finish payment");
+        setInfo(null);
+      } finally {
+        setBusy(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params]);
+
+  // Handle returning from a bank-required redirect for updating a saved card (SetupIntent)
+  useEffect(() => {
+    const setupIntentId = params.get("setup_intent") || params.get("si");
+    if (!setupIntentId) return;
+
+    const key = `brilliem_setup_intent_return_${setupIntentId}`;
+    if (sessionStorage.getItem(key)) return;
+    sessionStorage.setItem(key, "1");
+
+    (async () => {
+      try {
+        setBusy(true);
+        setError(null);
+        setInfo("Saving your new card…");
+
+        const res = await fetch("/api/stripe/payment-method/complete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ setupIntentId }),
+        });
+
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          throw new Error(text || "Failed to update payment method");
+        }
+
+        await fetchSavedCard();
+        clearPaymentMethodUpdate();
+        setInfo("Payment method updated.");
+        hardRefreshSelf("pmUpdated=1");
+      } catch (e: any) {
+        setError(e?.message || "Failed to update payment method");
         setInfo(null);
       } finally {
         setBusy(false);
@@ -430,6 +550,84 @@ export default function SubscriptionPage() {
     }
   }
 
+  async function beginUpdateCard() {
+    setError(null);
+    setInfo(null);
+
+    try {
+      if (!canPay) throw new Error("Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY");
+
+      setPmModalOpen(true);
+      setPmClientSecret(null);
+      setPmSetupIntentId(null);
+
+      const res = await fetch("/api/stripe/payment-method/setup-intent", {
+        method: "POST",
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(text || "Failed to start payment method update");
+      }
+
+      const data = (await res.json()) as { setupIntentId: string; clientSecret: string };
+      setPmSetupIntentId(data.setupIntentId);
+      setPmClientSecret(data.clientSecret);
+    } catch (e: any) {
+      clearPaymentMethodUpdate();
+      setError(e?.message || "Failed to start payment method update");
+    }
+  }
+
+  async function confirmUpdateCard() {
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+    try {
+      if (!pmClientSecret || !pmSetupIntentId) throw new Error("Payment method form not ready");
+      const stripe = stripeRef.current;
+      if (!stripe) throw new Error("Stripe failed to load");
+      const elements = pmElementsRef.current;
+      if (!elements) throw new Error("Payment form not ready yet");
+
+      const origin = window.location.origin;
+      const returnUrl = `${origin}/dashboard/subscription?si=${encodeURIComponent(pmSetupIntentId)}`;
+
+      const result = await stripe.confirmSetup({
+        elements,
+        confirmParams: { return_url: returnUrl },
+        redirect: "if_required",
+      });
+
+      if (result.error) throw new Error(result.error.message || "Failed to update card");
+
+      const status = result.setupIntent?.status;
+      if (status === "succeeded" || status === "processing") {
+        const setupIntentId = result.setupIntent?.id || pmSetupIntentId;
+
+        const res = await fetch("/api/stripe/payment-method/complete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ setupIntentId }),
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          throw new Error(text || "Failed to save updated payment method");
+        }
+
+        await fetchSavedCard();
+        clearPaymentMethodUpdate();
+        setInfo("Payment method updated.");
+      } else {
+        setInfo("Update submitted. If your bank needs verification, you’ll be returned here automatically.");
+      }
+    } catch (e: any) {
+      setError(e?.message || "Failed to update card");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!isLoaded) {
     return (
       <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -574,6 +772,47 @@ export default function SubscriptionPage() {
           })}
         </div>
 
+        {hasStripeCustomer && (
+          <div className="mt-6 rounded-3xl border border-slate-200 bg-slate-50 p-5">
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <div className="text-sm font-semibold text-slate-900">Payment method</div>
+                {savedCard ? (
+                  <div className="mt-1 text-sm text-slate-700">
+                    {savedCard.brand.toUpperCase()} •••• {savedCard.last4} · Expires {String(savedCard.expMonth).padStart(2, "0")}/{
+                      String(savedCard.expYear).slice(-2)
+                    }
+                  </div>
+                ) : (
+                  <div className="mt-1 text-sm text-slate-600">No payment method on file.</div>
+                )}
+              </div>
+
+              <button
+                type="button"
+                disabled={busy || !canPay}
+                onClick={beginUpdateCard}
+                className={cx(
+                  "rounded-2xl px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition",
+                  busy || !canPay ? "bg-slate-300" : "bg-slate-900 hover:bg-slate-800"
+                )}
+              >
+                {savedCard ? "Update card" : "Add card"}
+              </button>
+            </div>
+
+            {!canPay && (
+              <div className="mt-2 text-xs font-semibold text-amber-800">
+                Stripe publishable key missing (NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY).
+              </div>
+            )}
+
+            <div className="mt-2 text-xs text-slate-500">
+              This card will be used for your subscription invoices and upgrades.
+            </div>
+          </div>
+        )}
+
         {clientSecret && subscriptionId && targetTier && (
           <div className="mt-6 rounded-3xl border border-slate-200 bg-slate-50 p-5">
             <div className="text-sm font-semibold text-slate-900">Payment</div>
@@ -605,6 +844,57 @@ export default function SubscriptionPage() {
           </div>
         )}
       </div>
+
+      {pmModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-lg">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-lg font-bold text-slate-900">{savedCard ? "Update card" : "Add card"}</div>
+                <div className="mt-1 text-sm text-slate-600">
+                  Enter your new card securely. It will become your default payment method in Stripe.
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={clearPaymentMethodUpdate}
+                className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              {pmClientSecret ? (
+                <div
+                  ref={(el) => {
+                    pmHostRef.current = el;
+                  }}
+                />
+              ) : (
+                <div className="text-sm text-slate-600">Loading secure card form…</div>
+              )}
+            </div>
+
+            <button
+              type="button"
+              disabled={busy || !pmClientSecret}
+              onClick={confirmUpdateCard}
+              className={cx(
+                "mt-4 w-full rounded-2xl px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition",
+                busy || !pmClientSecret ? "bg-slate-300" : "bg-slate-900 hover:bg-slate-800"
+              )}
+            >
+              {busy ? "Saving…" : "Save card"}
+            </button>
+
+            <div className="mt-2 text-xs text-slate-500">
+              Some banks require an extra verification step (3D Secure). If so, you’ll be returned here automatically.
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
