@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useUser } from "@clerk/nextjs";
-import { loadStripe, type Stripe, type StripeElements } from "@stripe/stripe-js";
+import { loadStripe, type Stripe, type StripeElements, type StripeCardElement } from "@stripe/stripe-js";
 
 type Tier = "none" | "free" | "lessons" | "lessons_ai";
 type PaidTier = Exclude<Tier, "none" | "free">;
@@ -15,59 +15,55 @@ type CardSummary = {
   expYear: number;
 };
 
-const TIERS: Array<{
-  id: Tier;
-  name: string;
-  price: string;
-  bullets: string[];
-  accent: string;
-}> = [
-  {
-    id: "free",
-    name: "Free",
-    price: "$0",
-    bullets: ["Browse the site", "Access the first lesson in every unit (coming soon)", "Basic tools"],
-    accent: "from-slate-700 to-slate-900",
-  },
-  {
-    id: "lessons",
-    name: "Lessons",
-    price: "$15 / month",
-    bullets: ["Unlimited access to all lessons", "Premium content", "Progress tracking (coming soon)"],
-    accent: "from-blue-600 to-fuchsia-600",
-  },
-  {
-    id: "lessons_ai",
-    name: "Lessons + AI Tutor",
-    price: "$30 / month",
-    bullets: ["Unlimited lessons", "AI Tutor chat + photo homework help", "Priority features (coming soon)"],
-    accent: "from-emerald-600 to-cyan-600",
-  },
-];
+type PreviewLine = {
+  description: string;
+  amount: number;
+  currency: string;
+  proration: boolean;
+  periodStart?: number;
+  periodEnd?: number;
+};
+
+type PreviewResponse = {
+  currentTier: "free" | "lessons" | "lessons_ai";
+  desiredTier: "free" | "lessons" | "lessons_ai";
+  action: "none" | "signup" | "upgrade" | "downgrade" | "cancel_to_free" | "switch_to_free_immediate";
+  hasCustomer: boolean;
+  hasPaymentMethod: boolean;
+  paymentMethod: null | { brand: string; last4: string; expMonth: number; expYear: number };
+  currency: string;
+  dueNow: number;
+  nextAmount: number;
+  nextPaymentAt: number | null;
+  effectiveAt: number | null;
+  lines: PreviewLine[];
+  requiresPaymentMethod: boolean;
+};
 
 function cx(...parts: Array<string | false | null | undefined>) {
   return parts.filter(Boolean).join(" ");
 }
 
-function tierLabel(tier: Tier) {
-  if (tier === "none") return "No tier selected";
-  if (tier === "free") return "Free";
-  if (tier === "lessons") return "Lessons";
-  return "Lessons + AI Tutor";
+function tierLabel(t: Tier) {
+  if (t === "lessons_ai") return "Lessons + AI Tutor";
+  if (t === "lessons") return "Lessons";
+  if (t === "free") return "Free";
+  return "Not set";
 }
 
-function tierRank(tier: Tier) {
-  if (tier === "lessons_ai") return 2;
-  if (tier === "lessons") return 1;
-  if (tier === "free") return 0;
-  return -1;
+function formatMoney(cents: number, currency: string) {
+  const amt = (cents / 100).toFixed(2);
+  return `${amt} ${currency.toUpperCase()}`;
 }
 
-function formatDate(tsSeconds?: number | null) {
-  if (!tsSeconds) return null;
+function formatDate(epochSeconds: number | null | undefined) {
+  if (!epochSeconds) return null;
   try {
-    const d = new Date(tsSeconds * 1000);
-    return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    return new Date(epochSeconds * 1000).toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
   } catch {
     return null;
   }
@@ -78,172 +74,312 @@ export default function SubscriptionPage() {
   const params = useSearchParams();
   const { user, isLoaded } = useUser();
 
-  const [currentTier, setCurrentTier] = useState<Tier>("none");
-  const [pendingTier, setPendingTier] = useState<Tier | null>(null);
-  const [pendingEffective, setPendingEffective] = useState<number | null>(null);
+  // Tier + pending metadata (from Clerk)
+  const currentTier = (user?.unsafeMetadata?.tier as Tier | undefined) || "none";
+  const grade = (user?.unsafeMetadata?.grade as string | undefined) || "Not set yet";
 
-  const grade = (user?.unsafeMetadata?.gradeLevel as string) || "Not set yet";
+  const [pendingTier, setPendingTier] = useState<Tier | null>(
+    ((user?.unsafeMetadata?.pendingTier as Tier | undefined) || null) as any
+  );
+  const [pendingEffective, setPendingEffective] = useState<number | null>(
+    (user?.unsafeMetadata?.pendingTierEffective as number | undefined) || null
+  );
 
+  // Global UI state
   const [busy, setBusy] = useState(false);
-  const [info, setInfo] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
 
-  // Saved payment method (card) display + update flow
+  // Saved card + next payment (pulled from Stripe)
   const [hasStripeCustomer, setHasStripeCustomer] = useState(false);
   const [savedCard, setSavedCard] = useState<CardSummary | null>(null);
+  const [nextPaymentAt, setNextPaymentAt] = useState<number | null>(null);
+  const [nextPaymentAmount, setNextPaymentAmount] = useState<number | null>(null);
+  const [nextPaymentCurrency, setNextPaymentCurrency] = useState<string | null>(null);
+  const [cancelsAt, setCancelsAt] = useState<number | null>(null);
+
+  // Stripe client (shared)
+  const stripeRef = useRef<Stripe | null>(null);
+  const pubKey = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY || "";
+  const canPay = !!pubKey;
+
+  async function ensureStripe(): Promise<Stripe> {
+    const existing = stripeRef.current;
+    if (existing) return existing;
+    if (!canPay) throw new Error("Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY");
+    const s = await loadStripe(pubKey);
+    if (!s) throw new Error("Stripe failed to load");
+    stripeRef.current = s;
+    return s;
+  }
+
+  // ---------- Payment method update (card on file) ----------
   const [pmModalOpen, setPmModalOpen] = useState(false);
   const [pmClientSecret, setPmClientSecret] = useState<string | null>(null);
   const [pmSetupIntentId, setPmSetupIntentId] = useState<string | null>(null);
-
   const pmElementsRef = useRef<StripeElements | null>(null);
-  const pmMountedRef = useRef(false);
-  const pmHostRef = useRef<HTMLDivElement | null>(null);
+  const pmCardElRef = useRef<StripeCardElement | null>(null);
+  const pmCardMountRef = useRef<HTMLDivElement | null>(null);
 
-  // Payment element state (no @stripe/react-stripe-js needed)
-  const [clientSecret, setClientSecret] = useState<string | null>(null);
-  const [subscriptionId, setSubscriptionId] = useState<string | null>(null);
-  const [targetTier, setTargetTier] = useState<PaidTier | null>(null);
-
-  const stripeRef = useRef<Stripe | null>(null);
-  const elementsRef = useRef<StripeElements | null>(null);
-  const paymentMountedRef = useRef(false);
-  const paymentHostRef = useRef<HTMLDivElement | null>(null);
-
-  const publishableKey = process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY;
-  const canPay = useMemo(() => !!publishableKey, [publishableKey]);
-
-  // Initialize local tier(s) from Clerk user
-  useEffect(() => {
-    const t = ((user?.unsafeMetadata?.tier as Tier) || "none") as Tier;
-    setCurrentTier(t);
-
-    const pt = (user?.unsafeMetadata?.pendingTier as Tier | undefined) || null;
-    const pe = (user?.unsafeMetadata?.pendingTierEffective as number | undefined) || null;
-    setPendingTier(pt);
-    setPendingEffective(pe);
-  }, [user?.unsafeMetadata?.tier, user?.unsafeMetadata?.pendingTier, user?.unsafeMetadata?.pendingTierEffective]);
-
-  // Load the currently-saved payment method (masked card), if this user has a Stripe customer.
-  useEffect(() => {
-    if (!isLoaded) return;
-    void fetchSavedCard();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLoaded, user?.id]);
-
-  // Load Stripe once (client)
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      if (!publishableKey) return;
-      const stripe = await loadStripe(publishableKey);
-      if (!cancelled) stripeRef.current = stripe;
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [publishableKey]);
-
-  // Mount Payment Element when ready
-  useEffect(() => {
-    const stripe = stripeRef.current;
-    if (!stripe) return;
-    if (!clientSecret) return;
-    if (!paymentHostRef.current) return;
-    if (paymentMountedRef.current) return;
-
-    const elements = stripe.elements({ clientSecret });
-    const paymentElement = elements.create("payment");
-    paymentElement.mount(paymentHostRef.current);
-
-    elementsRef.current = elements;
-    paymentMountedRef.current = true;
-
-    return () => {
-      try {
-        paymentElement.unmount();
-      } catch {}
-      elementsRef.current = null;
-      paymentMountedRef.current = false;
-    };
-  }, [clientSecret]);
-
-  // Mount Payment Element for payment method updates (SetupIntent)
-  useEffect(() => {
-    const stripe = stripeRef.current;
-    if (!stripe) return;
-    if (!pmModalOpen) return;
-    if (!pmClientSecret) return;
-    if (!pmHostRef.current) return;
-    if (pmMountedRef.current) return;
-
-    const elements = stripe.elements({ clientSecret: pmClientSecret });
-    const paymentElement = elements.create("payment");
-    paymentElement.mount(pmHostRef.current);
-
-    pmElementsRef.current = elements;
-    pmMountedRef.current = true;
-
-    return () => {
-      try {
-        paymentElement.unmount();
-      } catch {}
-      pmElementsRef.current = null;
-      pmMountedRef.current = false;
-    };
-  }, [pmClientSecret, pmModalOpen]);
-
-  function clearPaymentState() {
-    setClientSecret(null);
-    setSubscriptionId(null);
-    setTargetTier(null);
-  }
-
-  function clearPaymentMethodUpdate() {
+  function clearPmState() {
+    try {
+      pmCardElRef.current?.unmount();
+    } catch {}
+    pmElementsRef.current = null;
+    pmCardElRef.current = null;
     setPmClientSecret(null);
     setPmSetupIntentId(null);
     setPmModalOpen(false);
   }
 
-  async function fetchSavedCard() {
+  async function mountPmCardElement() {
+    if (!pmModalOpen) return;
+    if (!pmClientSecret) return;
+    const mount = pmCardMountRef.current;
+    if (!mount) return;
+
+    const stripe = await ensureStripe();
+    // SetupIntent client secret isn't used by Elements here; CardElement doesn't need it.
+    const elements = stripe.elements({
+      appearance: { theme: "stripe" },
+    });
+
+    const card = elements.create("card", {
+      hidePostalCode: false,
+    });
+
+    // Mount
+    mount.innerHTML = "";
+    card.mount(mount);
+
+    pmElementsRef.current = elements;
+    pmCardElRef.current = card;
+  }
+
+  async function fetchBillingInfo() {
     try {
       const res = await fetch("/api/stripe/payment-method", { method: "GET" });
       if (!res.ok) return;
-      const data = (await res.json()) as
-        | { hasCustomer: false; hasPaymentMethod: false }
-        | { hasCustomer: true; hasPaymentMethod: boolean; brand?: string; last4?: string; expMonth?: number; expYear?: number };
+
+      const data = (await res.json()) as any;
 
       setHasStripeCustomer(!!data.hasCustomer);
+
       if (data.hasCustomer && data.hasPaymentMethod && data.brand && data.last4 && data.expMonth && data.expYear) {
         setSavedCard({
-          brand: data.brand,
-          last4: data.last4,
-          expMonth: data.expMonth,
-          expYear: data.expYear,
+          brand: String(data.brand),
+          last4: String(data.last4),
+          expMonth: Number(data.expMonth),
+          expYear: Number(data.expYear),
         });
       } else {
         setSavedCard(null);
       }
+
+      setNextPaymentAt(typeof data.nextPaymentAt === "number" ? data.nextPaymentAt : null);
+      setNextPaymentAmount(typeof data.nextPaymentAmount === "number" ? data.nextPaymentAmount : null);
+      setNextPaymentCurrency(typeof data.nextPaymentCurrency === "string" ? data.nextPaymentCurrency : null);
+      setCancelsAt(typeof data.cancelsAt === "number" ? data.cancelsAt : null);
     } catch {
       // ignore
     }
   }
 
-  async function refreshClerkTier(optimistic?: Tier) {
-    if (optimistic) setCurrentTier(optimistic);
+  async function beginUpdateCard() {
+    setError(null);
+    setInfo(null);
 
     try {
-      if (!user) return;
-      const reloaded = await user.reload();
+      const res = await fetch("/api/stripe/payment-method/setup-intent", { method: "POST" });
+      if (!res.ok) throw new Error(await res.text().catch(() => "Failed to start card update"));
 
-      const t = ((reloaded?.unsafeMetadata?.tier as Tier) || optimistic || "none") as Tier;
-      setCurrentTier(t);
+      const data = (await res.json()) as { setupIntentId: string; clientSecret: string };
+      setPmSetupIntentId(data.setupIntentId);
+      setPmClientSecret(data.clientSecret);
+      setPmModalOpen(true);
+    } catch (e: any) {
+      setError(e?.message || "Failed to start card update");
+    }
+  }
 
+  async function confirmUpdateCard() {
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+
+    try {
+      if (!pmClientSecret || !pmSetupIntentId) throw new Error("Card update not ready");
+      const stripe = await ensureStripe();
+
+      // Confirm SetupIntent with CardElement
+      const cardEl = pmCardElRef.current;
+      if (!cardEl) throw new Error("Card form not ready");
+
+      const returnUrl = `${window.location.origin}/dashboard/subscription?setupReturn=1&si=${encodeURIComponent(
+        pmSetupIntentId
+      )}`;
+
+      const result = await stripe.confirmCardSetup(pmClientSecret, {
+        payment_method: { card: cardEl },
+        return_url: returnUrl,
+      });
+
+      if (result.error) throw new Error(result.error.message || "Card verification failed");
+
+      const si = result.setupIntent;
+      const status = si?.status;
+
+      if (status === "succeeded" || status === "processing") {
+        // Tell server to set as default payment method
+        await fetch("/api/stripe/payment-method/complete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ setupIntentId: si.id }),
+        }).catch(() => null);
+
+        setInfo("Payment method updated.");
+        clearPmState();
+        await fetchBillingInfo();
+      } else {
+        setInfo("Card update submitted. If your bank needs verification, you’ll be returned here automatically.");
+      }
+    } catch (e: any) {
+      setError(e?.message || "Failed to update card");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Handle redirects back from Stripe (3DS) for card updates
+  useEffect(() => {
+    if (!isLoaded || !user) return;
+    const setupReturn = params.get("setupReturn");
+    const siId = params.get("setup_intent") || params.get("si");
+    if (!setupReturn || !siId) return;
+
+    const key = `brilliem_setup_return_${siId}`;
+    if (sessionStorage.getItem(key)) return;
+    sessionStorage.setItem(key, "1");
+
+    (async () => {
+      try {
+        setBusy(true);
+        setError(null);
+        setInfo("Saving your new card…");
+        await fetch("/api/stripe/payment-method/complete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ setupIntentId: siId }),
+        });
+
+        setInfo("Payment method updated.");
+        await fetchBillingInfo();
+        // Clear query
+        window.history.replaceState({}, "", "/dashboard/subscription");
+      } catch {
+        setError("Failed to save your new card. Please try again.");
+      } finally {
+        setBusy(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params, isLoaded]);
+
+  // ---------- Plan change confirmation modal ----------
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmTier, setConfirmTier] = useState<Tier | null>(null);
+  const [preview, setPreview] = useState<PreviewResponse | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  const planElementsRef = useRef<StripeElements | null>(null);
+  const planCardElRef = useRef<StripeCardElement | null>(null);
+  const planCardMountRef = useRef<HTMLDivElement | null>(null);
+
+  function clearPlanCard() {
+    try {
+      planCardElRef.current?.unmount();
+    } catch {}
+    planElementsRef.current = null;
+    planCardElRef.current = null;
+  }
+
+  async function mountPlanCardElement() {
+    if (!confirmOpen) return;
+    if (!preview?.requiresPaymentMethod) return;
+    const mount = planCardMountRef.current;
+    if (!mount) return;
+    if (planCardElRef.current) return;
+
+    const stripe = await ensureStripe();
+    const elements = stripe.elements({
+      appearance: { theme: "stripe" },
+    });
+
+    const card = elements.create("card", {
+      hidePostalCode: false,
+    });
+
+    mount.innerHTML = "";
+    card.mount(mount);
+
+    planElementsRef.current = elements;
+    planCardElRef.current = card;
+  }
+
+  async function openConfirm(tier: Tier) {
+    if (!user) return;
+    if (busy) return;
+
+    setError(null);
+    setInfo(null);
+    setPreview(null);
+    clearPlanCard();
+
+    setConfirmTier(tier);
+    setConfirmOpen(true);
+    setPreviewLoading(true);
+
+    try {
+      // Preview breakdown
+      const res = await fetch("/api/stripe/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tier: tier === "none" ? "free" : tier }),
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(text || "Failed to load price breakdown");
+      }
+
+      const data = (await res.json()) as PreviewResponse;
+      setPreview(data);
+    } catch (e: any) {
+      setError(e?.message || "Failed to load breakdown");
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  function closeConfirm() {
+    setConfirmOpen(false);
+    setConfirmTier(null);
+    setPreview(null);
+    clearPlanCard();
+  }
+
+  async function refreshClerkTier(optimisticTier?: Tier) {
+    if (!user) return;
+    try {
+      await user.reload();
+      const reloaded = user;
+      // local refresh for pending fields
       const pt = (reloaded?.unsafeMetadata?.pendingTier as Tier | undefined) || null;
       const pe = (reloaded?.unsafeMetadata?.pendingTierEffective as number | undefined) || null;
       setPendingTier(pt);
       setPendingEffective(pe);
     } catch {
-      // keep optimistic tier
+      // ignore
     } finally {
       router.refresh();
     }
@@ -255,27 +391,209 @@ export default function SubscriptionPage() {
     window.location.assign(url);
   }
 
-  async function finalizeActivation(input: { subscriptionId: string; tier: PaidTier }) {
+  async function finalizeActivation(payload: { subscriptionId: string; tier: PaidTier }) {
     const res = await fetch("/api/stripe/activate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(text || "Failed to activate subscription");
+      const t = await res.text().catch(() => "");
+      throw new Error(t || "Failed to activate subscription");
     }
   }
 
-  // Handle returning from a bank-required redirect (3DS)
+  async function executeConfirmedChange() {
+    if (!confirmTier) return;
+    if (!user) return;
+
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+
+    try {
+      // FREE
+      if (confirmTier === "free") {
+        const res = await fetch("/api/stripe/change-tier", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tier: "free" }),
+        });
+
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          throw new Error(text || "Failed to change plan");
+        }
+
+        const data = (await res.json()) as
+          | { mode: "downgrade_scheduled"; effectiveDate: number }
+          | { mode: "free_immediate" };
+
+        if (data.mode === "downgrade_scheduled") {
+          setPendingTier("free");
+          setPendingEffective(data.effectiveDate);
+          setInfo(`Switch to Free scheduled for ${formatDate(data.effectiveDate) || "your next renewal"}.`);
+          await refreshClerkTier();
+          closeConfirm();
+          hardRefreshSelf("scheduled=1");
+          return;
+        }
+
+        setPendingTier(null);
+        setPendingEffective(null);
+        setInfo("You’re now on the Free tier.");
+        await refreshClerkTier("free");
+        closeConfirm();
+        hardRefreshSelf("success=1");
+        return;
+      }
+
+      // PAID (signup OR paid->paid)
+      const nextTier = confirmTier as PaidTier;
+
+      const currentIsPaid = currentTier === "lessons" || currentTier === "lessons_ai";
+      const nextIsPaid = nextTier === "lessons" || nextTier === "lessons_ai";
+
+      // Paid -> Paid: use change-tier (upgrade immediate / downgrade scheduled)
+      if (currentIsPaid && nextIsPaid) {
+        const res = await fetch("/api/stripe/change-tier", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tier: nextTier }),
+        });
+
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          throw new Error(text || "Failed to change plan");
+        }
+
+        const data = (await res.json()) as
+          | { mode: "upgraded"; amountDue?: number; currency?: string }
+          | { mode: "payment_required"; subscriptionId: string; clientSecret: string; amountDue?: number; currency?: string }
+          | { mode: "downgrade_scheduled"; effectiveDate: number };
+
+        if (data.mode === "downgrade_scheduled") {
+          setPendingTier(nextTier);
+          setPendingEffective(data.effectiveDate);
+          setInfo(
+            `Downgrade scheduled. You’ll switch on ${formatDate(data.effectiveDate) || "your next renewal date"}.`
+          );
+          await refreshClerkTier();
+          closeConfirm();
+          hardRefreshSelf("scheduled=1");
+          return;
+        }
+
+        if (data.mode === "payment_required") {
+          const stripe = await ensureStripe();
+          const returnUrl = `${window.location.origin}/dashboard/subscription?paymentReturn=1&sid=${encodeURIComponent(
+            data.subscriptionId
+          )}&tier=${encodeURIComponent(nextTier)}`;
+
+          const result = await stripe.confirmCardPayment(data.clientSecret, { return_url: returnUrl });
+
+          if (result.error) throw new Error(result.error.message || "Payment failed");
+          const status = result.paymentIntent?.status;
+          if (status === "succeeded" || status === "processing") {
+            setPendingTier(null);
+            setPendingEffective(null);
+            setInfo("Payment successful! Your plan was upgraded.");
+            await refreshClerkTier(nextTier);
+            closeConfirm();
+            hardRefreshSelf("success=1");
+            return;
+          }
+
+          setInfo("Payment submitted. If your bank needs verification, you’ll be returned here automatically.");
+          closeConfirm();
+          return;
+        }
+
+        // upgraded (no extra action)
+        setPendingTier(null);
+        setPendingEffective(null);
+        setInfo("Plan updated.");
+        await refreshClerkTier(nextTier);
+        closeConfirm();
+        hardRefreshSelf("success=1");
+        return;
+      }
+
+      // Signup / Free -> Paid: create subscription intent, confirm PI, activate
+      const intentRes = await fetch("/api/stripe/subscription-intent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tier: nextTier }),
+      });
+
+      if (!intentRes.ok) {
+        const text = await intentRes.text().catch(() => "");
+        throw new Error(text || "Failed to start subscription");
+      }
+
+      const intentData = (await intentRes.json()) as { subscriptionId: string; clientSecret: string };
+      const stripe = await ensureStripe();
+
+      const returnUrl = `${window.location.origin}/dashboard/subscription?paymentReturn=1&sid=${encodeURIComponent(
+        intentData.subscriptionId
+      )}&tier=${encodeURIComponent(nextTier)}`;
+
+      // If they don't have a card on file, require CardElement input
+      if (preview?.requiresPaymentMethod) {
+        const cardEl = planCardElRef.current;
+        if (!cardEl) throw new Error("Card form not ready");
+        const result = await stripe.confirmCardPayment(intentData.clientSecret, {
+          payment_method: { card: cardEl },
+          return_url: returnUrl,
+        });
+        if (result.error) throw new Error(result.error.message || "Payment failed");
+        const status = result.paymentIntent?.status;
+        if (status === "succeeded" || status === "processing") {
+          await finalizeActivation({ subscriptionId: intentData.subscriptionId, tier: nextTier });
+          setPendingTier(null);
+          setPendingEffective(null);
+          setInfo("Payment successful! Your subscription is active.");
+          await refreshClerkTier(nextTier);
+          closeConfirm();
+          hardRefreshSelf("success=1");
+          return;
+        }
+      } else {
+        // Use saved card on file; confirm handles 3DS if required
+        const result = await stripe.confirmCardPayment(intentData.clientSecret, { return_url: returnUrl });
+        if (result.error) throw new Error(result.error.message || "Payment failed");
+        const status = result.paymentIntent?.status;
+        if (status === "succeeded" || status === "processing") {
+          await finalizeActivation({ subscriptionId: intentData.subscriptionId, tier: nextTier });
+          setPendingTier(null);
+          setPendingEffective(null);
+          setInfo("Subscription activated.");
+          await refreshClerkTier(nextTier);
+          closeConfirm();
+          hardRefreshSelf("success=1");
+          return;
+        }
+      }
+
+      setInfo("Payment submitted. If your bank needs verification, you’ll be returned here automatically.");
+      closeConfirm();
+    } catch (e: any) {
+      setError(e?.message || "Failed to change plan");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Handle return from Stripe PaymentIntent (3DS) for subscription signup/upgrade
   useEffect(() => {
-    const piSecret = params.get("payment_intent_client_secret");
+    if (!isLoaded || !user) return;
+
+    const paymentReturn = params.get("paymentReturn");
     const sid = params.get("sid");
     const t = params.get("tier") as PaidTier | null;
+    if (!paymentReturn || !sid || !t) return;
 
-    if (!piSecret || !sid || !t) return;
-
-    const key = `brilliem_subscription_payment_return_${sid}`;
+    const key = `brilliem_payment_return_${sid}`;
     if (sessionStorage.getItem(key)) return;
     sessionStorage.setItem(key, "1");
 
@@ -285,363 +603,102 @@ export default function SubscriptionPage() {
         setError(null);
         setInfo("Finishing your payment…");
 
-        const stripe = stripeRef.current;
-        if (!stripe) throw new Error("Stripe failed to load");
+        // If this was a signup flow, activate in Clerk (safe to call even if already activated)
+        await finalizeActivation({ subscriptionId: sid, tier: t }).catch(() => null);
 
-        const { paymentIntent, error: retrieveErr } = await stripe.retrievePaymentIntent(piSecret);
-        if (retrieveErr) throw new Error(retrieveErr.message || "Failed to retrieve payment intent");
+        setPendingTier(null);
+        setPendingEffective(null);
+        await refreshClerkTier(t);
 
-        if (paymentIntent?.status === "succeeded" || paymentIntent?.status === "processing") {
-          await finalizeActivation({ subscriptionId: sid, tier: t });
+        setInfo("Payment completed.");
+        await fetchBillingInfo();
 
-          clearPaymentState();
-          setPendingTier(null);
-          setPendingEffective(null);
-
-          setInfo("Payment successful! Your subscription is active.");
-          await refreshClerkTier(t);
-
-          hardRefreshSelf("success=1");
-        } else {
-          setError(`Payment not completed (status: ${paymentIntent?.status || "unknown"})`);
-          setInfo(null);
-        }
-      } catch (e: any) {
-        setError(e?.message || "Failed to finish payment");
-        setInfo(null);
+        window.history.replaceState({}, "", "/dashboard/subscription");
+      } catch {
+        setError("Payment completed, but we couldn’t finalize your subscription. Please refresh and try again.");
       } finally {
         setBusy(false);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params]);
+  }, [params, isLoaded]);
 
-  // Handle returning from a bank-required redirect for updating a saved card (SetupIntent)
+  // Mount card elements when modals open
   useEffect(() => {
-    const setupIntentId = params.get("setup_intent") || params.get("si");
-    if (!setupIntentId) return;
-
-    const key = `brilliem_setup_intent_return_${setupIntentId}`;
-    if (sessionStorage.getItem(key)) return;
-    sessionStorage.setItem(key, "1");
-
-    (async () => {
-      try {
-        setBusy(true);
-        setError(null);
-        setInfo("Saving your new card…");
-
-        const res = await fetch("/api/stripe/payment-method/complete", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ setupIntentId }),
-        });
-
-        if (!res.ok) {
-          const text = await res.text().catch(() => "");
-          throw new Error(text || "Failed to update payment method");
-        }
-
-        await fetchSavedCard();
-        clearPaymentMethodUpdate();
-        setInfo("Payment method updated.");
-        hardRefreshSelf("pmUpdated=1");
-      } catch (e: any) {
-        setError(e?.message || "Failed to update payment method");
-        setInfo(null);
-      } finally {
-        setBusy(false);
-      }
-    })();
+    if (!pmModalOpen) return;
+    mountPmCardElement().catch(() => null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params]);
+  }, [pmModalOpen, pmClientSecret]);
 
-  async function setFreeTier() {
-    if (!user) return;
-    setBusy(true);
-    setError(null);
-    setInfo(null);
-    try {
-      const res = await fetch("/api/stripe/change-tier", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tier: "free" }),
-      });
+  useEffect(() => {
+    if (!confirmOpen) return;
+    mountPlanCardElement().catch(() => null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [confirmOpen, preview?.requiresPaymentMethod]);
 
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(text || "Failed to switch to Free tier");
-      }
+  // Initial fetch of billing info once user is loaded
+  useEffect(() => {
+    if (!isLoaded || !user) return;
+    fetchBillingInfo().catch(() => null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoaded]);
 
-      const data = (await res.json()) as
-        | { mode: "free_immediate" }
-        | { mode: "downgrade_scheduled"; effectiveDate: number };
+  const pendingText = useMemo(() => {
+    if (!pendingTier) return null;
+    const d = formatDate(pendingEffective || null);
+    if (pendingTier === "free") return `Pending: Free (effective ${d || "next billing period"})`;
+    return `Pending: ${tierLabel(pendingTier)} (effective ${d || "next billing period"})`;
+  }, [pendingTier, pendingEffective]);
 
-      clearPaymentState();
-
-      if (data.mode === "downgrade_scheduled") {
-        setPendingTier("free");
-        setPendingEffective(data.effectiveDate);
-
-        const d = formatDate(data.effectiveDate);
-        setInfo(`Downgrade scheduled. You’ll switch to Free on ${d || "your next renewal date"}.`);
-
-        await refreshClerkTier();
-        hardRefreshSelf("scheduled=1");
-      } else {
-        setPendingTier(null);
-        setPendingEffective(null);
-
-        setInfo("You’re now on the Free tier.");
-        await refreshClerkTier("free");
-        hardRefreshSelf("success=1");
-      }
-    } catch (e: any) {
-      setError(e?.errors?.[0]?.message || e?.message || "Failed to switch to Free tier");
-    } finally {
-      setBusy(false);
+  const nextPayText = useMemo(() => {
+    if (!hasStripeCustomer) return null;
+    if (cancelsAt) {
+      return `Ends: ${formatDate(cancelsAt) || "at period end"}`;
     }
-  }
+    if (!nextPaymentAt) return null;
+    const date = formatDate(nextPaymentAt);
+    if (!date) return null;
 
-  async function changePaidTier(nextTier: PaidTier) {
-    if (!user) return;
-    if (nextTier === currentTier) return;
-
-    setBusy(true);
-    setError(null);
-    setInfo(null);
-
-    try {
-      const res = await fetch("/api/stripe/change-tier", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tier: nextTier }),
-      });
-
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(text || "Failed to change plan");
-      }
-
-      const data = (await res.json()) as
-        | { mode: "upgraded"; amountDue?: number; currency?: string }
-        | { mode: "payment_required"; subscriptionId: string; clientSecret: string; amountDue?: number; currency?: string }
-        | { mode: "downgrade_scheduled"; effectiveDate: number };
-
-      if (data.mode === "downgrade_scheduled") {
-        setPendingTier(nextTier);
-        setPendingEffective(data.effectiveDate);
-
-        const d = formatDate(data.effectiveDate);
-        setInfo(`Downgrade scheduled. You’ll switch on ${d || "your next renewal date"}.`);
-
-        await refreshClerkTier();
-        hardRefreshSelf("scheduled=1");
-        return;
-      }
-
-      if (data.mode === "payment_required") {
-        setSubscriptionId(data.subscriptionId);
-        setClientSecret(data.clientSecret);
-        setTargetTier(nextTier);
-
-        if (typeof data.amountDue === "number") {
-          const dollars = (data.amountDue / 100).toFixed(2);
-          setInfo(`Upgrade requires a prorated payment of $${dollars} ${data.currency?.toUpperCase() || ""}.`);
-        } else {
-          setInfo("Upgrade requires a prorated payment. Please complete payment below.");
-        }
-        return;
-      }
-
-      // Upgraded successfully (Stripe auto-paid the proration invoice with saved method)
-      setPendingTier(null);
-      setPendingEffective(null);
-
-      if (typeof data.amountDue === "number" && data.amountDue > 0) {
-        const dollars = (data.amountDue / 100).toFixed(2);
-        setInfo(`Upgraded! Prorated charge: $${dollars} ${data.currency?.toUpperCase() || ""}.`);
-      } else {
-        setInfo("Upgraded!");
-      }
-
-      await refreshClerkTier(nextTier);
-      hardRefreshSelf("success=1");
-    } catch (e: any) {
-      setError(e?.message || "Could not change plan");
-    } finally {
-      setBusy(false);
+    if (typeof nextPaymentAmount === "number" && nextPaymentCurrency) {
+      return `Next payment: ${date} (${formatMoney(nextPaymentAmount, nextPaymentCurrency)})`;
     }
+    return `Next payment: ${date}`;
+  }, [hasStripeCustomer, cancelsAt, nextPaymentAt, nextPaymentAmount, nextPaymentCurrency]);
+
+  const tiers = useMemo(
+    () => [
+      {
+        id: "free" as const,
+        title: "Free",
+        price: "$0",
+        features: ["Browse the site", "Access the first lesson in every unit (coming soon)", "Basic tools"],
+        accent: "from-slate-700 to-slate-900",
+      },
+      {
+        id: "lessons" as const,
+        title: "Lessons",
+        price: "$15 / month",
+        features: ["Unlimited access to all lessons", "Premium content", "Progress tracking (coming soon)"],
+        accent: "from-indigo-500 to-fuchsia-500",
+      },
+      {
+        id: "lessons_ai" as const,
+        title: "Lessons + AI Tutor",
+        price: "$30 / month",
+        features: ["Unlimited lessons", "AI Tutor chat + photo homework help", "Priority features (coming soon)"],
+        accent: "from-emerald-500 to-cyan-500",
+      },
+    ],
+    []
+  );
+
+  function isCurrent(t: Tier) {
+    return t !== "none" && t === currentTier;
   }
 
-  async function startPaidTier(nextTier: PaidTier) {
-    setBusy(true);
-    setError(null);
-    setInfo(null);
-    try {
-      if (!canPay) throw new Error("Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY");
-
-      const res = await fetch("/api/stripe/subscription-intent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tier: nextTier }),
-      });
-
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(text || "Failed to start subscription");
-      }
-
-      const data = (await res.json()) as { subscriptionId: string; clientSecret: string };
-      setSubscriptionId(data.subscriptionId);
-      setClientSecret(data.clientSecret);
-      setTargetTier(nextTier);
-      setInfo(null);
-    } catch (e: any) {
-      setError(e?.message || "Could not start payment");
-    } finally {
-      setBusy(false);
-    }
+  function isScheduled(t: Tier) {
+    return !!pendingTier && pendingTier === t;
   }
-
-  async function confirmPaidTier() {
-    setBusy(true);
-    setError(null);
-    setInfo(null);
-    try {
-      if (!subscriptionId || !clientSecret || !targetTier) throw new Error("Payment not ready");
-      const stripe = stripeRef.current;
-      if (!stripe) throw new Error("Stripe failed to load");
-      const elements = elementsRef.current;
-      if (!elements) throw new Error("Payment form not ready yet");
-
-      const origin = window.location.origin;
-      const returnUrl = `${origin}/dashboard/subscription?paymentReturn=1&sid=${encodeURIComponent(
-        subscriptionId
-      )}&tier=${encodeURIComponent(targetTier)}`;
-
-      const result = await stripe.confirmPayment({
-        elements,
-        confirmParams: { return_url: returnUrl },
-        redirect: "if_required",
-      });
-
-      if (result.error) throw new Error(result.error.message || "Payment failed");
-
-      const status = result.paymentIntent?.status;
-      if (status === "succeeded" || status === "processing") {
-        await finalizeActivation({ subscriptionId, tier: targetTier });
-
-        clearPaymentState();
-        setPendingTier(null);
-        setPendingEffective(null);
-
-        setInfo("Payment successful! Your subscription is active.");
-        await refreshClerkTier(targetTier);
-
-        hardRefreshSelf("success=1");
-      } else {
-        setInfo("Payment submitted. If your bank needs verification, you’ll be returned here automatically.");
-      }
-    } catch (e: any) {
-      setError(e?.message || "Payment failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function beginUpdateCard() {
-    setError(null);
-    setInfo(null);
-
-    try {
-      if (!canPay) throw new Error("Missing NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY");
-
-      setPmModalOpen(true);
-      setPmClientSecret(null);
-      setPmSetupIntentId(null);
-
-      const res = await fetch("/api/stripe/payment-method/setup-intent", {
-        method: "POST",
-      });
-
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(text || "Failed to start payment method update");
-      }
-
-      const data = (await res.json()) as { setupIntentId: string; clientSecret: string };
-      setPmSetupIntentId(data.setupIntentId);
-      setPmClientSecret(data.clientSecret);
-    } catch (e: any) {
-      clearPaymentMethodUpdate();
-      setError(e?.message || "Failed to start payment method update");
-    }
-  }
-
-  async function confirmUpdateCard() {
-    setBusy(true);
-    setError(null);
-    setInfo(null);
-    try {
-      if (!pmClientSecret || !pmSetupIntentId) throw new Error("Payment method form not ready");
-      const stripe = stripeRef.current;
-      if (!stripe) throw new Error("Stripe failed to load");
-      const elements = pmElementsRef.current;
-      if (!elements) throw new Error("Payment form not ready yet");
-
-      const origin = window.location.origin;
-      const returnUrl = `${origin}/dashboard/subscription?si=${encodeURIComponent(pmSetupIntentId)}`;
-
-      const result = await stripe.confirmSetup({
-        elements,
-        confirmParams: { return_url: returnUrl },
-        redirect: "if_required",
-      });
-
-      if (result.error) throw new Error(result.error.message || "Failed to update card");
-
-      const status = result.setupIntent?.status;
-      if (status === "succeeded" || status === "processing") {
-        const setupIntentId = result.setupIntent?.id || pmSetupIntentId;
-
-        const res = await fetch("/api/stripe/payment-method/complete", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ setupIntentId }),
-        });
-        if (!res.ok) {
-          const text = await res.text().catch(() => "");
-          throw new Error(text || "Failed to save updated payment method");
-        }
-
-        await fetchSavedCard();
-        clearPaymentMethodUpdate();
-        setInfo("Payment method updated.");
-      } else {
-        setInfo("Update submitted. If your bank needs verification, you’ll be returned here automatically.");
-      }
-    } catch (e: any) {
-      setError(e?.message || "Failed to update card");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (!isLoaded) {
-    return (
-      <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-        <div className="text-sm text-slate-600">Loading…</div>
-      </div>
-    );
-  }
-
-  const pendingText =
-    pendingTier && pendingTier !== currentTier
-      ? `Pending: ${tierLabel(pendingTier)}${
-          pendingEffective ? ` (effective ${formatDate(pendingEffective) || "next billing period"})` : ""
-        }`
-      : null;
 
   return (
     <div className="grid gap-6">
@@ -658,6 +715,7 @@ export default function SubscriptionPage() {
             <div>
               <span className="font-semibold text-slate-900">Current tier:</span> {tierLabel(currentTier)}
             </div>
+            {nextPayText && <div className="mt-1 text-xs text-slate-600">{nextPayText}</div>}
             {pendingText && <div className="mt-1 text-xs text-slate-600">{pendingText}</div>}
           </div>
         </div>
@@ -680,209 +738,298 @@ export default function SubscriptionPage() {
           <div>
             <h2 className="text-lg font-bold text-slate-900">Choose your plan</h2>
             <p className="mt-1 text-sm text-slate-600">
-              Choose a tier to unlock content. You can change plans anytime.
+              Choose a tier to unlock content. We’ll show you a breakdown before anything changes.
             </p>
           </div>
+
           {!canPay && (
-            <div className="text-xs font-semibold text-amber-800">
-              Stripe publishable key missing (NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY).
+            <div className="rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              Missing Stripe publishable key
             </div>
           )}
         </div>
 
-        <div className="mt-5 grid gap-4 md:grid-cols-3">
-          {TIERS.map((t) => {
-            const isCurrent = currentTier === t.id;
-            const isPaid = t.id !== "free";
-            const isScheduled = pendingTier === t.id && !isCurrent;
-
-            const disabled = busy || isCurrent || isScheduled || (isPaid && !canPay);
-
-            const buttonText = isCurrent
-              ? "Selected"
-              : isScheduled
-                ? "Scheduled"
-                : busy
-                  ? isPaid
-                    ? "Starting…"
-                    : "Saving…"
-                  : currentTier !== "none"
-                    ? "Change to this plan"
-                    : "Select this plan";
-
+        <div className="mt-6 grid gap-4 md:grid-cols-3">
+          {tiers.map((t) => {
+            const disabled = busy || !canPay || isCurrent(t.id) || isScheduled(t.id);
             return (
-              <div key={t.id} className="rounded-3xl border border-slate-200 bg-white p-5">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className="text-base font-bold text-slate-900">{t.name}</div>
-                    <div className="mt-1 text-sm text-slate-600">{t.price}</div>
-                  </div>
-
-                  {isCurrent ? (
-                    <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-800">
+              <div key={t.id} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-base font-bold text-slate-900">{t.title}</div>
+                  {isCurrent(t.id) && (
+                    <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-700">
                       Current
                     </span>
-                  ) : isScheduled ? (
-                    <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-900">
+                  )}
+                  {!isCurrent(t.id) && isScheduled(t.id) && (
+                    <span className="rounded-full bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-700">
                       Scheduled
                     </span>
-                  ) : null}
+                  )}
                 </div>
 
-                <ul className="mt-4 space-y-2 text-sm text-slate-700">
-                  {t.bullets.map((b) => (
-                    <li key={b} className="flex gap-2">
-                      <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-slate-400" />
-                      <span>{b}</span>
+                <div className="mt-1 text-sm text-slate-700">{t.price}</div>
+
+                <ul className="mt-4 space-y-2 text-sm text-slate-600">
+                  {t.features.map((f) => (
+                    <li key={f} className="flex gap-2">
+                      <span className="mt-1 h-1.5 w-1.5 flex-none rounded-full bg-slate-400" />
+                      <span>{f}</span>
                     </li>
                   ))}
                 </ul>
 
-                <div className="mt-5">
-                  <button
-                    type="button"
-                    disabled={disabled}
-                    onClick={() => {
-                      if (t.id === "free") return void setFreeTier();
+                <button
+                  disabled={disabled}
+                  onClick={() => openConfirm(t.id)}
+                  className={cx(
+                    "mt-5 w-full rounded-2xl px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition",
+                    disabled ? "bg-slate-300" : `bg-gradient-to-r ${t.accent} hover:brightness-110`
+                  )}
+                >
+                  {isCurrent(t.id) ? "Selected" : isScheduled(t.id) ? "Scheduled" : "Change to this plan"}
+                </button>
 
-                      const currentIsPaid = currentTier === "lessons" || currentTier === "lessons_ai";
-                      const nextIsPaid = t.id === "lessons" || t.id === "lessons_ai";
-
-                      if (currentIsPaid && nextIsPaid) return void changePaidTier(t.id as PaidTier);
-                      return void startPaidTier(t.id as PaidTier);
-                    }}
-                    className={cx(
-                      "w-full rounded-2xl px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition",
-                      disabled ? "bg-slate-300" : `bg-gradient-to-r ${t.accent} hover:brightness-110`
-                    )}
-                  >
-                    {buttonText}
-                  </button>
-                </div>
-
-                {isPaid && currentTier !== "none" && currentTier !== "free" && !isCurrent && !isScheduled && (
-                  <div className="mt-2 text-xs text-slate-500">
-                    {tierRank(t.id) < tierRank(currentTier)
-                      ? "Downgrades take effect next billing period."
-                      : "Upgrades take effect immediately with proration."}
-                  </div>
+                {(currentTier === "lessons_ai" || currentTier === "lessons") && (t.id === "free" || t.id === "lessons") && (
+                  <div className="mt-2 text-xs text-slate-500">Downgrades take effect next billing period.</div>
                 )}
               </div>
             );
           })}
         </div>
+      </div>
 
-        {hasStripeCustomer && (
-          <div className="mt-6 rounded-3xl border border-slate-200 bg-slate-50 p-5">
-            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <div>
-                <div className="text-sm font-semibold text-slate-900">Payment method</div>
-                {savedCard ? (
-                  <div className="mt-1 text-sm text-slate-700">
-                    {savedCard.brand.toUpperCase()} •••• {savedCard.last4} · Expires {String(savedCard.expMonth).padStart(2, "0")}/{
-                      String(savedCard.expYear).slice(-2)
-                    }
-                  </div>
-                ) : (
-                  <div className="mt-1 text-sm text-slate-600">No payment method on file.</div>
-                )}
-              </div>
-
-              <button
-                type="button"
-                disabled={busy || !canPay}
-                onClick={beginUpdateCard}
-                className={cx(
-                  "rounded-2xl px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition",
-                  busy || !canPay ? "bg-slate-300" : "bg-slate-900 hover:bg-slate-800"
-                )}
-              >
-                {savedCard ? "Update card" : "Add card"}
-              </button>
-            </div>
-
-            {!canPay && (
-              <div className="mt-2 text-xs font-semibold text-amber-800">
-                Stripe publishable key missing (NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY).
-              </div>
-            )}
-
-            <div className="mt-2 text-xs text-slate-500">
-              This card will be used for your subscription invoices and upgrades.
-            </div>
-          </div>
-        )}
-
-        {clientSecret && subscriptionId && targetTier && (
-          <div className="mt-6 rounded-3xl border border-slate-200 bg-slate-50 p-5">
-            <div className="text-sm font-semibold text-slate-900">Payment</div>
-            <div className="mt-1 text-sm text-slate-600">Complete this payment without leaving the page.</div>
-
-            <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
-              <div
-                ref={(el) => {
-                  paymentHostRef.current = el;
-                }}
-              />
+      {/* Payment method section */}
+      {hasStripeCustomer && (
+        <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 className="text-lg font-bold text-slate-900">Payment method</h2>
+              <p className="mt-1 text-sm text-slate-600">This card will be used for subscription payments.</p>
             </div>
 
             <button
-              type="button"
-              disabled={busy}
-              onClick={confirmPaidTier}
+              onClick={beginUpdateCard}
+              disabled={busy || !canPay}
               className={cx(
-                "mt-4 w-full rounded-2xl px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition",
-                busy ? "bg-slate-300" : "bg-slate-900 hover:bg-slate-800"
+                "rounded-2xl px-4 py-2 text-sm font-semibold text-white shadow-sm transition",
+                busy || !canPay ? "bg-slate-300" : "bg-slate-900 hover:bg-slate-800"
               )}
             >
-              {busy ? "Processing…" : "Confirm & Pay"}
+              Update card
             </button>
-
-            <div className="mt-2 text-xs text-slate-500">
-              Some banks require an extra verification step (3D Secure). If so, you’ll be brought back here automatically.
-            </div>
           </div>
-        )}
-      </div>
 
-      {pmModalOpen && (
+          <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+            {savedCard ? (
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="font-semibold text-slate-900">
+                    {savedCard.brand.toUpperCase()} •••• {savedCard.last4}
+                  </div>
+                  <div className="text-xs text-slate-600">
+                    Expires {String(savedCard.expMonth).padStart(2, "0")}/{String(savedCard.expYear).slice(-2)}
+                  </div>
+                </div>
+                <div className="text-xs text-slate-600">Charges happen automatically.</div>
+              </div>
+            ) : (
+              <div>No saved card found.</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Confirm plan modal */}
+      {confirmOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-lg">
-            <div className="flex items-start justify-between gap-3">
+          <div className="w-full max-w-2xl rounded-3xl bg-white p-6 shadow-lg">
+            <div className="flex items-start justify-between gap-4">
               <div>
-                <div className="text-lg font-bold text-slate-900">{savedCard ? "Update card" : "Add card"}</div>
+                <div className="text-lg font-bold text-slate-900">Confirm plan change</div>
                 <div className="mt-1 text-sm text-slate-600">
-                  Enter your new card securely. It will become your default payment method in Stripe.
+                  {confirmTier ? (
+                    <>
+                      You’re switching to <span className="font-semibold text-slate-900">{tierLabel(confirmTier)}</span>.
+                    </>
+                  ) : (
+                    "Loading…"
+                  )}
                 </div>
               </div>
 
               <button
-                type="button"
-                onClick={clearPaymentMethodUpdate}
-                className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                onClick={closeConfirm}
+                disabled={busy}
+                className={cx(
+                  "rounded-xl px-3 py-1.5 text-sm font-semibold",
+                  busy ? "text-slate-400" : "text-slate-700 hover:bg-slate-100"
+                )}
               >
                 Close
               </button>
             </div>
 
-            <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              {pmClientSecret ? (
-                <div
-                  ref={(el) => {
-                    pmHostRef.current = el;
-                  }}
-                />
-              ) : (
-                <div className="text-sm text-slate-600">Loading secure card form…</div>
+            <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              {previewLoading && <div className="text-sm text-slate-600">Loading breakdown…</div>}
+
+              {!previewLoading && preview && (
+                <div className="grid gap-4">
+                  <div className="grid gap-2">
+                    <div className="text-sm font-semibold text-slate-900">Payment breakdown</div>
+
+                    <div className="rounded-xl border border-slate-200 bg-white">
+                      <div className="max-h-48 overflow-auto p-3 text-sm text-slate-700">
+                        {preview.lines.length === 0 ? (
+                          <div className="text-slate-600">No line items</div>
+                        ) : (
+                          <ul className="space-y-2">
+                            {preview.lines.map((l, idx) => (
+                              <li key={idx} className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="truncate">{l.description}</div>
+                                  {l.periodStart && l.periodEnd && (
+                                    <div className="mt-0.5 text-xs text-slate-500">
+                                      {formatDate(l.periodStart) || ""} – {formatDate(l.periodEnd) || ""}
+                                    </div>
+                                  )}
+                                </div>
+                                <div className={cx("shrink-0 font-semibold", l.amount < 0 && "text-emerald-700")}>
+                                  {l.amount < 0 ? "-" : ""}
+                                  {formatMoney(Math.abs(l.amount), l.currency)}
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+
+                      <div className="border-t border-slate-200 bg-slate-50 p-3 text-sm">
+                        <div className="flex items-center justify-between">
+                          <div className="font-semibold text-slate-900">Due now</div>
+                          <div className="font-bold text-slate-900">{formatMoney(preview.dueNow, preview.currency)}</div>
+                        </div>
+
+                        {preview.action === "downgrade" || preview.action === "cancel_to_free" ? (
+                          <div className="mt-2 text-xs text-slate-600">
+                            No charge today. Your current plan stays active until{" "}
+                            <span className="font-semibold text-slate-900">
+                              {formatDate(preview.effectiveAt || preview.nextPaymentAt) || "your next renewal"}
+                            </span>
+                            .
+                          </div>
+                        ) : (
+                          <div className="mt-2 text-xs text-slate-600">
+                            Next payment:{" "}
+                            <span className="font-semibold text-slate-900">
+                              {formatDate(preview.nextPaymentAt) || "next billing date"}
+                            </span>{" "}
+                            ({formatMoney(preview.nextAmount, preview.currency)})
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Card on file / card entry */}
+                  {confirmTier !== "free" && (
+                    <div className="rounded-xl border border-slate-200 bg-white p-4">
+                      <div className="text-sm font-semibold text-slate-900">How you’ll pay</div>
+
+                      {!preview.requiresPaymentMethod && (preview.paymentMethod || savedCard) ? (
+                        <div className="mt-2 text-sm text-slate-700">
+                          We’ll charge{" "}
+                          <span className="font-semibold text-slate-900">
+                            {(preview.paymentMethod?.brand || savedCard?.brand || "Card").toUpperCase()} ••••{" "}
+                            {preview.paymentMethod?.last4 || savedCard?.last4}
+                          </span>
+                          .
+                        </div>
+                      ) : (
+                        <div className="mt-2 text-sm text-slate-700">Enter your card details to pay.</div>
+                      )}
+
+                      {preview.requiresPaymentMethod && (
+                        <div className="mt-3">
+                          <div ref={planCardMountRef} className="rounded-xl border border-slate-200 bg-white p-3" />
+                          <div className="mt-2 text-xs text-slate-500">
+                            Your card will be saved for future payments.
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
               )}
             </div>
 
+            <div className="mt-5 flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-end">
+              <button
+                onClick={closeConfirm}
+                disabled={busy}
+                className={cx(
+                  "rounded-2xl px-4 py-2 text-sm font-semibold",
+                  busy ? "text-slate-400" : "text-slate-700 hover:bg-slate-100"
+                )}
+              >
+                Cancel
+              </button>
+
+              <button
+                onClick={executeConfirmedChange}
+                disabled={busy || previewLoading || !preview}
+                className={cx(
+                  "rounded-2xl px-4 py-2 text-sm font-semibold text-white shadow-sm transition",
+                  busy || previewLoading || !preview ? "bg-slate-300" : "bg-slate-900 hover:bg-slate-800"
+                )}
+              >
+                {busy
+                  ? "Processing…"
+                  : confirmTier === "free"
+                    ? "Confirm"
+                    : preview?.requiresPaymentMethod
+                      ? "Confirm & Pay"
+                      : "Confirm"}
+              </button>
+            </div>
+
+            <div className="mt-3 text-xs text-slate-500">
+              Some banks require an extra verification step (3D Secure). If so, you’ll be returned here automatically.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Update card modal */}
+      {pmModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-lg">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="text-lg font-bold text-slate-900">Update your card</div>
+                <div className="mt-1 text-sm text-slate-600">This will update the card used for subscription payments.</div>
+              </div>
+              <button
+                onClick={clearPmState}
+                disabled={busy}
+                className={cx(
+                  "rounded-xl px-3 py-1.5 text-sm font-semibold",
+                  busy ? "text-slate-400" : "text-slate-700 hover:bg-slate-100"
+                )}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-4">
+              <div ref={pmCardMountRef} className="rounded-xl border border-slate-200 bg-white p-3" />
+            </div>
+
             <button
-              type="button"
-              disabled={busy || !pmClientSecret}
               onClick={confirmUpdateCard}
+              disabled={busy || !pmClientSecret}
               className={cx(
-                "mt-4 w-full rounded-2xl px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition",
+                "mt-5 w-full rounded-2xl px-4 py-2 text-sm font-semibold text-white shadow-sm transition",
                 busy || !pmClientSecret ? "bg-slate-300" : "bg-slate-900 hover:bg-slate-800"
               )}
             >
@@ -890,7 +1037,7 @@ export default function SubscriptionPage() {
             </button>
 
             <div className="mt-2 text-xs text-slate-500">
-              Some banks require an extra verification step (3D Secure). If so, you’ll be returned here automatically.
+              Some banks require an extra verification step (3D Secure). If so, you’ll be brought back here automatically.
             </div>
           </div>
         </div>
