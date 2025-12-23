@@ -2,18 +2,6 @@ import { auth, clerkClient } from "@clerk/nextjs/server";
 import { stripe } from "@/lib/stripe";
 import { intervalFromPriceRecurring, priceIdFor, type BillingInterval, type Tier } from "@/lib/stripePlans";
 
-function monthlyEquivalentAmount(price: any): number {
-  const unit = typeof price?.unit_amount === "number" ? price.unit_amount : 0;
-  const recurring = price?.recurring || null;
-  const interval = recurring?.interval || "month";
-  const count = recurring?.interval_count || 1;
-  if (interval === "year") return Math.round(unit / (12 * count));
-  if (interval === "month") return Math.round(unit / count);
-  if (interval === "week") return Math.round(unit / (count * 4));
-  if (interval === "day") return Math.round(unit / (count * 30));
-  return unit;
-}
-
 async function updateClerk(userId: string, patch: Record<string, any>) {
   const client = await clerkClient();
   const user = await client.users.getUser(userId);
@@ -111,59 +99,14 @@ export async function POST(req: Request) {
   const nextPriceId = priceIdFor(desired as Exclude<Tier, "free">, desiredInterval);
   if (!nextPriceId) return new Response("Missing Stripe price id env var for desired tier", { status: 500 });
 
-  // Decide downgrade vs upgrade based on plan cost.
-  // Downgrades should NOT prorate: keep current plan until period end and schedule the change.
-  const currentPriceForCompare = await stripe.prices.retrieve(String(item.price.id));
+  // Decide upgrade vs downgrade based on whether there is money due NOW.
+  // - If money is due now -> apply immediately with proration.
+  // - If money due is 0 -> schedule the change for next billing period (NO proration).
   const desiredPrice = await stripe.prices.retrieve(nextPriceId);
   const desiredStripeInterval = intervalFromPriceRecurring((desiredPrice as any)?.recurring || null);
-  const isDowngradeByPrice = monthlyEquivalentAmount(desiredPrice) < monthlyEquivalentAmount(currentPriceForCompare);
-
   const intervalChanged = currentSubInterval !== desiredStripeInterval;
   const anchorForImmediate = intervalChanged ? "now" : "unchanged";
 
-  // DOWNGRADE by price: schedule for next billing period (no proration)
-  if (isDowngradeByPrice) {
-    const scheduleId = await getOrCreateScheduleId();
-    const schedule = await stripe.subscriptionSchedules.retrieve(scheduleId);
-
-    // Keep the current phase start date EXACTLY as Stripe set it, or Stripe will error:
-    // "You can not modify the start date of the current phase."
-    const currentPhaseStart = schedule.phases?.[0]?.start_date;
-    if (!currentPhaseStart) return new Response("Subscription schedule has no current phase", { status: 500 });
-
-    const periodEnd = subscription.current_period_end;
-
-    await stripe.subscriptionSchedules.update(scheduleId, {
-      end_behavior: "release",
-      phases: [
-        {
-          items: [{ price: String(item.price.id), quantity }],
-          start_date: currentPhaseStart,
-          end_date: periodEnd,
-        },
-        {
-          items: [{ price: nextPriceId, quantity }],
-          start_date: periodEnd,
-        },
-      ],
-    });
-
-    await updateClerk(userId, {
-      tier: currentTier,
-      // Prefer the interval derived from the subscription price (metadata could be stale).
-      billingInterval: currentSubInterval,
-      pendingTier: desired,
-      pendingBillingInterval: desiredStripeInterval,
-      pendingTierEffective: periodEnd,
-      stripeSubscriptionStatus: subscription.status,
-      stripeCustomerId: subscription.customer,
-      stripeSubscriptionId: subscription.id,
-    });
-
-    return Response.json({ mode: "downgrade_scheduled", effectiveDate: periodEnd });
-  }
-
-  // Not a downgrade by price — decide based on money due NOW.
   const upcoming = await stripe.invoices.retrieveUpcoming({
     customer: String(subscription.customer),
     subscription: subId,

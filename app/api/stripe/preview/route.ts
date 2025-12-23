@@ -2,24 +2,6 @@ import { auth, clerkClient } from "@clerk/nextjs/server";
 import { stripe } from "@/lib/stripe";
 import { intervalFromPriceRecurring, priceIdFor, type BillingInterval, type Tier } from "@/lib/stripePlans";
 
-function monthlyEquivalentAmount(price: any): number {
-  // Returns an amount in the smallest currency unit (e.g., cents) that represents
-  // the *per-month* cost of this price.
-  //
-  // We do this so we can decide "downgrade" vs "upgrade" based on plan cost,
-  // even when switching month <-> year.
-  const unit = typeof price?.unit_amount === "number" ? price.unit_amount : 0;
-  const recurring = price?.recurring || null;
-  const interval = recurring?.interval || "month";
-  const count = recurring?.interval_count || 1;
-
-  if (interval === "year") return Math.round(unit / (12 * count));
-  if (interval === "month") return Math.round(unit / count);
-  if (interval === "week") return Math.round(unit / (count * 4));
-  if (interval === "day") return Math.round(unit / (count * 30));
-  return unit;
-}
-
 function summarizeCard(pm: any) {
   const card = pm?.card;
   if (!card) return null;
@@ -182,7 +164,9 @@ export async function POST(req: Request) {
   const desiredPriceId = priceIdFor(desired, desiredInterval);
   if (!desiredPriceId) return new Response("Missing Stripe price id env var", { status: 500 });
 
-  // Paid -> paid: decide upgrade vs downgrade based on whether there is money due now.
+  // Paid -> paid: preview an immediate change with prorations.
+  // If money is due NOW, we treat it as an upgrade (apply immediately).
+  // If money due is 0, we treat it as a downgrade (schedule for next period) and we do NOT prorate.
   const item = sub.items.data[0];
   if (!item) return new Response("Subscription has no items", { status: 400 });
 
@@ -194,60 +178,6 @@ export async function POST(req: Request) {
   const desiredRecurring = (desiredPrice as any)?.recurring || null;
   const desiredStripeInterval = intervalFromPriceRecurring(desiredRecurring);
   const intervalChanged = subInterval !== desiredStripeInterval;
-
-  // Decide downgrade vs upgrade based on plan cost (not prorations).
-  // A "downgrade" means the target plan costs less than the current plan.
-  // For downgrades we DO NOT prorate: we keep the current plan active and
-  // schedule the change for the next billing period.
-  let currentPriceForCompare: any = currentPrice;
-  if (currentPriceForCompare && typeof currentPriceForCompare.unit_amount !== "number" && currentPriceForCompare.id) {
-    // Some expansions omit unit_amount; fetch explicitly.
-    currentPriceForCompare = await stripe.prices.retrieve(String(currentPriceForCompare.id));
-  }
-
-  const currentMonthly = monthlyEquivalentAmount(currentPriceForCompare);
-  const desiredMonthly = monthlyEquivalentAmount(desiredPrice);
-  const isDowngradeByPrice = desiredMonthly < currentMonthly;
-
-  if (isDowngradeByPrice) {
-    const unit = desiredPrice.unit_amount ?? 0;
-    const interval = desiredPrice.recurring?.interval || "month";
-    const intervalCount = desiredPrice.recurring?.interval_count || 1;
-    const nextPeriodEnd = addIntervalSeconds(currentPeriodEnd, interval, intervalCount);
-
-    // Update base intervals to reflect what Stripe says (more reliable than stale Clerk metadata)
-    base.currentInterval = subInterval;
-    base.desiredInterval = desiredStripeInterval;
-
-    return Response.json({
-      ...base,
-      currency: desiredPrice.currency || currencyFromSub,
-      action: "downgrade",
-      dueNow: 0,
-      nextAmount: unit,
-      nextPaymentAt: currentPeriodEnd,
-      effectiveAt: currentPeriodEnd,
-      requiresPaymentMethod: !paymentMethod,
-      lines: [
-        {
-          description: "No charge today (change scheduled for next billing period)",
-          amount: 0,
-          currency: desiredPrice.currency || currencyFromSub,
-          proration: false,
-          periodStart: sub.current_period_start as number,
-          periodEnd: currentPeriodEnd,
-        },
-        {
-          description: `1 × ${desired === "lessons" ? "Lessons" : "Lessons + AI Tutor"} (${desiredStripeInterval === "year" ? "Yearly" : "Monthly"})`,
-          amount: unit,
-          currency: desiredPrice.currency || currencyFromSub,
-          proration: false,
-          periodStart: currentPeriodEnd,
-          periodEnd: nextPeriodEnd,
-        },
-      ],
-    });
-  }
 
   // If we're switching monthly <-> yearly, we anchor to now for upgrades so next renewal makes sense.
   // For same-interval upgrades, keep anchor unchanged.
