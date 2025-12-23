@@ -100,10 +100,10 @@ export async function POST(req: Request) {
   if (!nextPriceId) return new Response("Missing Stripe price id env var for desired tier", { status: 500 });
 
   // Decide upgrade vs downgrade based on whether there is money due NOW.
-  const currentInterval = intervalFromPriceRecurring((item.price as any)?.recurring || null);
+  // (We already computed the current subscription interval from the current price.)
   const desiredPrice = await stripe.prices.retrieve(nextPriceId);
   const desiredStripeInterval = intervalFromPriceRecurring((desiredPrice as any)?.recurring || null);
-  const intervalChanged = currentInterval !== desiredStripeInterval;
+  const intervalChanged = currentSubInterval !== desiredStripeInterval;
   const anchorForImmediate = intervalChanged ? "now" : "unchanged";
 
   const upcoming = await stripe.invoices.retrieveUpcoming({
@@ -145,7 +145,8 @@ export async function POST(req: Request) {
 
     await updateClerk(userId, {
       tier: currentTier,
-      billingInterval: currentInterval,
+      // Prefer the interval derived from the subscription price (metadata could be stale).
+      billingInterval: currentSubInterval,
       pendingTier: desired,
       pendingBillingInterval: desiredStripeInterval,
       pendingTierEffective: periodEnd,

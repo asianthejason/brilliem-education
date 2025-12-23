@@ -58,10 +58,6 @@ function intervalLabel(i: BillingInterval) {
   return i === "year" ? "Yearly" : "Monthly";
 }
 
-function intervalLabel(i: BillingInterval) {
-  return i === "year" ? "Yearly" : "Monthly";
-}
-
 function formatMoney(cents: number, currency: string) {
   const amt = (cents / 100).toFixed(2);
   return `${amt} ${currency.toUpperCase()}`;
@@ -1111,4 +1107,3 @@ export default function SubscriptionPage() {
     </div>
   );
 }
-
