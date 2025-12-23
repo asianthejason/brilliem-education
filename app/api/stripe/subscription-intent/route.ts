@@ -1,23 +1,9 @@
 import { auth, clerkClient } from "@clerk/nextjs/server";
 import { stripe } from "@/lib/stripe";
+import { priceIdFor, type BillingInterval, type PaidTier } from "@/lib/stripePlans";
 
-type Tier = "lessons" | "lessons_ai";
 
-function priceForTier(tier: Tier) {
-  const lessons =
-    process.env.STRIPE_PRICE_LESSONS ||
-    process.env.STRIPE_LESSONS_PRICE_ID ||
-    process.env.LESSONS_PRICE_ID;
-
-  const lessonsAi =
-    process.env.STRIPE_PRICE_LESSONS_AI_TUTOR ||
-    process.env.STRIPE_PRICE_LESSONS_AI ||
-    process.env.STRIPE_LESSONS_AI_TUTOR_PRICE_ID ||
-    process.env.LESSONS_AI_TUTOR_PRICE_ID;
-
-  if (tier === "lessons") return lessons;
-  return lessonsAi;
-}
+type Tier = PaidTier;
 
 /**
  * Creates a Stripe Subscription in `default_incomplete` state and returns the
@@ -29,11 +15,12 @@ export async function POST(req: Request) {
   const { userId } = await auth();
   if (!userId) return new Response("Unauthorized", { status: 401 });
 
-  const body = (await req.json().catch(() => null)) as { tier?: Tier } | null;
+  const body = (await req.json().catch(() => null)) as { tier?: Tier; interval?: BillingInterval } | null;
   const tier = body?.tier;
+  const interval: BillingInterval = body?.interval === "year" ? "year" : "month";
   if (!tier) return new Response("Missing tier", { status: 400 });
 
-  const priceId = priceForTier(tier);
+  const priceId = priceIdFor(tier, interval);
   if (!priceId) return new Response("Missing Stripe price id env var", { status: 500 });
 
   const client = await clerkClient();
@@ -68,7 +55,7 @@ export async function POST(req: Request) {
         save_default_payment_method: "on_subscription",
       },
       expand: ["latest_invoice.payment_intent"],
-      metadata: { clerkUserId: userId, tier },
+      metadata: { clerkUserId: userId, tier, interval },
     },
     { idempotencyKey }
   );

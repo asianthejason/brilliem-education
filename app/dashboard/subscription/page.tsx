@@ -7,6 +7,7 @@ import { loadStripe, type Stripe, type StripeElements, type StripeCardElement } 
 
 type Tier = "none" | "free" | "lessons" | "lessons_ai";
 type PaidTier = Exclude<Tier, "none" | "free">;
+type BillingInterval = "month" | "year";
 
 type CardSummary = {
   brand: string;
@@ -27,6 +28,8 @@ type PreviewLine = {
 type PreviewResponse = {
   currentTier: "free" | "lessons" | "lessons_ai";
   desiredTier: "free" | "lessons" | "lessons_ai";
+  currentInterval: BillingInterval;
+  desiredInterval: BillingInterval;
   action: "none" | "signup" | "upgrade" | "downgrade" | "cancel_to_free" | "switch_to_free_immediate";
   hasCustomer: boolean;
   hasPaymentMethod: boolean;
@@ -49,6 +52,14 @@ function tierLabel(t: Tier) {
   if (t === "lessons") return "Lessons";
   if (t === "free") return "Free";
   return "Not set";
+}
+
+function intervalLabel(i: BillingInterval) {
+  return i === "year" ? "Yearly" : "Monthly";
+}
+
+function intervalLabel(i: BillingInterval) {
+  return i === "year" ? "Yearly" : "Monthly";
 }
 
 function formatMoney(cents: number, currency: string) {
@@ -76,14 +87,21 @@ export default function SubscriptionPage() {
 
   // Tier + pending metadata (from Clerk)
   const currentTier = (user?.unsafeMetadata?.tier as Tier | undefined) || "none";
+  const currentInterval = ((user?.unsafeMetadata?.billingInterval as BillingInterval | undefined) || "month") as BillingInterval;
   const grade = (user?.unsafeMetadata?.grade as string | undefined) || "Not set yet";
 
   const [pendingTier, setPendingTier] = useState<Tier | null>(
     ((user?.unsafeMetadata?.pendingTier as Tier | undefined) || null) as any
   );
+  const [pendingInterval, setPendingInterval] = useState<BillingInterval | null>(
+    ((user?.unsafeMetadata?.pendingBillingInterval as BillingInterval | undefined) || null) as any
+  );
   const [pendingEffective, setPendingEffective] = useState<number | null>(
     (user?.unsafeMetadata?.pendingTierEffective as number | undefined) || null
   );
+
+  // Plan picker interval (Monthly / Yearly)
+  const [billingInterval, setBillingInterval] = useState<BillingInterval>("month");
 
   // Global UI state
   const [busy, setBusy] = useState(false);
@@ -344,7 +362,7 @@ export default function SubscriptionPage() {
       const res = await fetch("/api/stripe/preview", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tier: tier === "none" ? "free" : tier }),
+        body: JSON.stringify({ tier: tier === "none" ? "free" : tier, interval: billingInterval }),
       });
 
       if (!res.ok) {
@@ -375,8 +393,10 @@ export default function SubscriptionPage() {
       const reloaded = user;
       // local refresh for pending fields
       const pt = (reloaded?.unsafeMetadata?.pendingTier as Tier | undefined) || null;
+      const pi = (reloaded?.unsafeMetadata?.pendingBillingInterval as BillingInterval | undefined) || null;
       const pe = (reloaded?.unsafeMetadata?.pendingTierEffective as number | undefined) || null;
       setPendingTier(pt);
+      setPendingInterval(pi);
       setPendingEffective(pe);
     } catch {
       // ignore
@@ -459,7 +479,7 @@ export default function SubscriptionPage() {
         const res = await fetch("/api/stripe/change-tier", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ tier: nextTier }),
+          body: JSON.stringify({ tier: nextTier, interval: billingInterval }),
         });
 
         if (!res.ok) {
@@ -523,7 +543,7 @@ export default function SubscriptionPage() {
       const intentRes = await fetch("/api/stripe/subscription-intent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tier: nextTier }),
+        body: JSON.stringify({ tier: nextTier, interval: billingInterval }),
       });
 
       if (!intentRes.ok) {
@@ -639,6 +659,8 @@ export default function SubscriptionPage() {
   // Initial fetch of billing info once user is loaded
   useEffect(() => {
     if (!isLoaded || !user) return;
+    // Default the toggle to the user's current billing interval (if any)
+    setBillingInterval(currentInterval);
     fetchBillingInfo().catch(() => null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoaded]);
@@ -647,8 +669,9 @@ export default function SubscriptionPage() {
     if (!pendingTier) return null;
     const d = formatDate(pendingEffective || null);
     if (pendingTier === "free") return `Pending: Free (effective ${d || "next billing period"})`;
-    return `Pending: ${tierLabel(pendingTier)} (effective ${d || "next billing period"})`;
-  }, [pendingTier, pendingEffective]);
+    const int = pendingInterval ? ` ${intervalLabel(pendingInterval)}` : "";
+    return `Pending: ${tierLabel(pendingTier)}${int} (effective ${d || "next billing period"})`;
+  }, [pendingTier, pendingInterval, pendingEffective]);
 
   const nextPayText = useMemo(() => {
     if (!hasStripeCustomer) return null;
@@ -666,30 +689,40 @@ export default function SubscriptionPage() {
   }, [hasStripeCustomer, cancelsAt, nextPaymentAt, nextPaymentAmount, nextPaymentCurrency]);
 
   const tiers = useMemo(
-    () => [
+    () => {
+      const isYearly = billingInterval === "year";
+      const lessonsPrice = isYearly ? "$120 / year" : "$15 / month";
+      const lessonsAiPrice = isYearly ? "$240 / year" : "$30 / month";
+      const lessonsSub = isYearly ? "($10/mo billed yearly)" : null;
+      const lessonsAiSub = isYearly ? "($20/mo billed yearly)" : null;
+      return [
       {
         id: "free" as const,
         title: "Free",
         price: "$0",
+        subPrice: null as string | null,
         features: ["Browse the site", "Access the first lesson in every unit (coming soon)", "Basic tools"],
         accent: "from-slate-700 to-slate-900",
       },
       {
         id: "lessons" as const,
         title: "Lessons",
-        price: "$15 / month",
+        price: lessonsPrice,
+        subPrice: lessonsSub,
         features: ["Unlimited access to all lessons", "Premium content", "Progress tracking (coming soon)"],
         accent: "from-indigo-500 to-fuchsia-500",
       },
       {
         id: "lessons_ai" as const,
         title: "Lessons + AI Tutor",
-        price: "$30 / month",
+        price: lessonsAiPrice,
+        subPrice: lessonsAiSub,
         features: ["Unlimited lessons", "AI Tutor chat + photo homework help", "Priority features (coming soon)"],
         accent: "from-emerald-500 to-cyan-500",
       },
-    ],
-    []
+      ];
+    },
+    [billingInterval]
   );
 
   function isCurrent(t: Tier) {
@@ -742,11 +775,38 @@ export default function SubscriptionPage() {
             </p>
           </div>
 
-          {!canPay && (
-            <div className="rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-900">
-              Missing Stripe publishable key
+          <div className="flex items-center gap-3">
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-1">
+              <button
+                type="button"
+                onClick={() => setBillingInterval("month")}
+                disabled={busy}
+                className={cx(
+                  "rounded-xl px-4 py-2 text-sm font-semibold",
+                  billingInterval === "month" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600 hover:text-slate-900"
+                )}
+              >
+                Monthly
+              </button>
+              <button
+                type="button"
+                onClick={() => setBillingInterval("year")}
+                disabled={busy}
+                className={cx(
+                  "rounded-xl px-4 py-2 text-sm font-semibold",
+                  billingInterval === "year" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600 hover:text-slate-900"
+                )}
+              >
+                Yearly
+              </button>
             </div>
-          )}
+
+            {!canPay && (
+              <div className="rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                Missing Stripe publishable key
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="mt-6 grid gap-4 md:grid-cols-3">
@@ -769,6 +829,7 @@ export default function SubscriptionPage() {
                 </div>
 
                 <div className="mt-1 text-sm text-slate-700">{t.price}</div>
+                {t.subPrice && <div className="mt-1 text-xs text-slate-500">{t.subPrice}</div>}
 
                 <ul className="mt-4 space-y-2 text-sm text-slate-600">
                   {t.features.map((f) => (
@@ -850,7 +911,12 @@ export default function SubscriptionPage() {
                 <div className="mt-1 text-sm text-slate-600">
                   {confirmTier ? (
                     <>
-                      You’re switching to <span className="font-semibold text-slate-900">{tierLabel(confirmTier)}</span>.
+                      You’re switching to{" "}
+                      <span className="font-semibold text-slate-900">
+                        {tierLabel(confirmTier)}
+                        {preview && confirmTier !== "free" ? ` (${intervalLabel(preview.desiredInterval)})` : ""}
+                      </span>
+                      .
                     </>
                   ) : (
                     "Loading…"

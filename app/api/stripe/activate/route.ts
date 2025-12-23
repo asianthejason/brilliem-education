@@ -1,20 +1,17 @@
 import { auth, clerkClient } from "@clerk/nextjs/server";
 import { stripe } from "@/lib/stripe";
-
-type Tier = "free" | "lessons" | "lessons_ai";
+import { intervalFromPriceRecurring, tierFromPriceId, type BillingInterval, type Tier } from "@/lib/stripePlans";
 
 export async function POST(req: Request) {
   const { userId } = await auth();
   if (!userId) return new Response("Unauthorized", { status: 401 });
 
   const body = (await req.json().catch(() => null)) as
-    | { subscriptionId?: string; tier?: Tier }
+    | { subscriptionId?: string; tier?: Tier; interval?: BillingInterval }
     | null;
 
   const subscriptionId = body?.subscriptionId;
-  const tier = body?.tier;
-
-  if (!subscriptionId || !tier) return new Response("Missing subscriptionId or tier", { status: 400 });
+  if (!subscriptionId) return new Response("Missing subscriptionId", { status: 400 });
 
   const client = await clerkClient();
   const user = await client.users.getUser(userId);
@@ -23,6 +20,10 @@ export async function POST(req: Request) {
   const sub = await stripe.subscriptions.retrieve(subscriptionId, {
     expand: ["latest_invoice.payment_intent"],
   });
+
+  const priceId = (sub.items.data?.[0]?.price?.id as string | undefined) || null;
+  const derivedTier: Tier = tierFromPriceId(priceId);
+  const derivedInterval: BillingInterval = intervalFromPriceRecurring((sub.items.data?.[0]?.price as any)?.recurring);
 
   if (sub.metadata?.clerkUserId !== userId) {
     return new Response("Forbidden", { status: 403 });
@@ -60,8 +61,10 @@ export async function POST(req: Request) {
 
   const nextUnsafe: Record<string, any> = {
     ...meta,
-    tier,
+    tier: derivedTier,
+    billingInterval: derivedInterval,
     pendingTier: undefined,
+    pendingBillingInterval: undefined,
     pendingTierEffective: undefined,
     stripeCustomerId: sub.customer as string,
     stripeSubscriptionId: subscriptionId,

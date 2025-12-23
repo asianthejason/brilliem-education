@@ -1,29 +1,6 @@
 import { auth, clerkClient } from "@clerk/nextjs/server";
 import { stripe } from "@/lib/stripe";
-
-type Tier = "free" | "lessons" | "lessons_ai";
-
-function rank(t: Tier) {
-  if (t === "lessons_ai") return 2;
-  if (t === "lessons") return 1;
-  return 0;
-}
-
-function priceIdForTier(tier: Exclude<Tier, "free">) {
-  const lessons =
-    process.env.STRIPE_PRICE_LESSONS ||
-    process.env.STRIPE_LESSONS_PRICE_ID ||
-    process.env.LESSONS_PRICE_ID;
-
-  const lessonsAi =
-    process.env.STRIPE_PRICE_LESSONS_AI_TUTOR ||
-    process.env.STRIPE_PRICE_LESSONS_AI ||
-    process.env.STRIPE_LESSONS_AI_TUTOR_PRICE_ID ||
-    process.env.LESSONS_AI_TUTOR_PRICE_ID;
-
-  if (tier === "lessons") return lessons;
-  return lessonsAi;
-}
+import { intervalFromPriceRecurring, priceIdFor, type BillingInterval, type Tier } from "@/lib/stripePlans";
 
 function summarizeCard(pm: any) {
   const card = pm?.card;
@@ -50,8 +27,9 @@ export async function POST(req: Request) {
   const { userId } = await auth();
   if (!userId) return new Response("Unauthorized", { status: 401 });
 
-  const body = (await req.json().catch(() => null)) as { tier?: Tier } | null;
+  const body = (await req.json().catch(() => null)) as { tier?: Tier; interval?: BillingInterval } | null;
   const desired = body?.tier;
+  const desiredInterval: BillingInterval = body?.interval === "year" ? "year" : "month";
   if (!desired) return new Response("Missing tier", { status: 400 });
 
   const client = await clerkClient();
@@ -59,6 +37,7 @@ export async function POST(req: Request) {
   const meta = (user.unsafeMetadata || {}) as Record<string, any>;
 
   const currentTier = (meta.tier as Tier | undefined) || "free";
+  const currentInterval: BillingInterval = (meta.billingInterval as BillingInterval | undefined) || "month";
   const customerId = meta.stripeCustomerId as string | undefined;
   const subscriptionId = meta.stripeSubscriptionId as string | undefined;
 
@@ -78,6 +57,8 @@ export async function POST(req: Request) {
   const base = {
     currentTier,
     desiredTier: desired,
+    currentInterval,
+    desiredInterval,
     hasCustomer: !!customerId,
     hasPaymentMethod: !!paymentMethod,
     paymentMethod,
@@ -117,7 +98,7 @@ export async function POST(req: Request) {
       });
     }
 
-    const priceId = priceIdForTier(desired);
+    const priceId = priceIdFor(desired, desiredInterval);
     if (!priceId) return new Response("Missing Stripe price id env var", { status: 500 });
 
     const price = await stripe.prices.retrieve(priceId);
@@ -139,7 +120,7 @@ export async function POST(req: Request) {
       requiresPaymentMethod: !paymentMethod, // if they have no saved card, the client will show card entry
       lines: [
         {
-          description: `First month: ${desired === "lessons" ? "Lessons" : "Lessons + AI Tutor"}`,
+          description: `First ${interval}: ${desired === "lessons" ? "Lessons" : "Lessons + AI Tutor"}`,
           amount: unit,
           currency,
           proration: false,
@@ -180,60 +161,35 @@ export async function POST(req: Request) {
     });
   }
 
-  const desiredRank = rank(desired);
-  const currentRank = rank(currentTier);
-
-  const desiredPriceId = priceIdForTier(desired);
+  const desiredPriceId = priceIdFor(desired, desiredInterval);
   if (!desiredPriceId) return new Response("Missing Stripe price id env var", { status: 500 });
 
-  // Downgrades: show scheduled switch at period end (no immediate charge)
-  if (desiredRank < currentRank) {
-    const price = await stripe.prices.retrieve(desiredPriceId);
-    const unit = price.unit_amount ?? 0;
-    const currency = price.currency || currencyFromSub;
-
-    return Response.json({
-      ...base,
-      currency,
-      action: "downgrade",
-      dueNow: 0,
-      nextAmount: unit,
-      nextPaymentAt: currentPeriodEnd,
-      effectiveAt: currentPeriodEnd,
-      lines: [
-        {
-          description: "No charge today (downgrade takes effect next billing period)",
-          amount: 0,
-          currency,
-          proration: false,
-          periodStart: sub.current_period_start as number,
-          periodEnd: currentPeriodEnd,
-        },
-        {
-          description: `Next period: ${desired === "lessons" ? "Lessons" : "Lessons + AI Tutor"}`,
-          amount: unit,
-          currency,
-          proration: false,
-          periodStart: currentPeriodEnd,
-        },
-      ],
-    });
-  }
-
-  // Upgrades: preview proration due now + next period total.
+  // Paid -> paid: decide upgrade vs downgrade based on whether there is money due now.
   const item = sub.items.data[0];
   if (!item) return new Response("Subscription has no items", { status: 400 });
+
+  const currentPrice = (item.price as any) || null;
+  const currentRecurring = currentPrice?.recurring || null;
+  const subInterval = intervalFromPriceRecurring(currentRecurring);
+
+  const desiredPrice = await stripe.prices.retrieve(desiredPriceId);
+  const desiredRecurring = (desiredPrice as any)?.recurring || null;
+  const desiredStripeInterval = intervalFromPriceRecurring(desiredRecurring);
+  const intervalChanged = subInterval !== desiredStripeInterval;
+
+  // If we're switching monthly <-> yearly, we anchor to now for upgrades so next renewal makes sense.
+  // For same-interval upgrades, keep anchor unchanged.
+  const anchorForImmediate = intervalChanged ? "now" : "unchanged";
 
   const upcoming = await stripe.invoices.retrieveUpcoming({
     customer: subCustomer,
     subscription: sub.id,
     subscription_items: [{ id: item.id, price: desiredPriceId }],
     subscription_proration_behavior: "create_prorations",
-    subscription_billing_cycle_anchor: "unchanged",
+    subscription_billing_cycle_anchor: anchorForImmediate,
   } as any);
 
   const currency = upcoming.currency || currencyFromSub;
-
   const lines = (upcoming.lines?.data || []).map((l: any) => ({
     description: (l.description as string) || "Line item",
     amount: l.amount as number,
@@ -243,16 +199,53 @@ export async function POST(req: Request) {
     periodEnd: l.period?.end as number | undefined,
   }));
 
-  const dueNow = lines.filter((l) => l.proration).reduce((sum, l) => sum + l.amount, 0);
-  const nextAmount = lines.filter((l) => !l.proration).reduce((sum, l) => sum + l.amount, 0);
+  const dueNow = Math.max(0, (upcoming.amount_due ?? 0) as number);
+
+  // Update base intervals to reflect what Stripe says (more reliable than stale Clerk metadata)
+  base.currentInterval = subInterval;
+  base.desiredInterval = desiredStripeInterval;
+
+  // If we anchor to now, the next payment should be 1 interval from now (estimated for UI).
+  const nowSec = Math.floor(Date.now() / 1000);
+  const nextPaymentAt = intervalChanged
+    ? addIntervalSeconds(nowSec, desiredPrice.recurring?.interval || "month", desiredPrice.recurring?.interval_count || 1)
+    : currentPeriodEnd;
+
+  // If the user owes money now, it's an upgrade (apply immediately). Otherwise schedule it.
+  if (dueNow <= 0) {
+    const unit = desiredPrice.unit_amount ?? 0;
+    const nextAmount = unit;
+    return Response.json({
+      ...base,
+      currency: desiredPrice.currency || currency,
+      action: "downgrade",
+      dueNow: 0,
+      nextAmount,
+      nextPaymentAt: currentPeriodEnd,
+      effectiveAt: currentPeriodEnd,
+      requiresPaymentMethod: !paymentMethod,
+      lines: [
+        {
+          description: "No charge today (changes take effect next billing period)",
+          amount: 0,
+          currency: desiredPrice.currency || currency,
+          proration: false,
+          periodStart: sub.current_period_start as number,
+          periodEnd: currentPeriodEnd,
+        },
+      ],
+    });
+  }
+
+  const nextAmount = 0; // renewal is shown via nextPaymentAt and Stripe header; line items already show full picture
 
   return Response.json({
     ...base,
     currency,
-    action: desiredRank > currentRank ? "upgrade" : "none",
-    dueNow: Math.max(0, dueNow),
+    action: "upgrade",
+    dueNow,
     nextAmount,
-    nextPaymentAt: currentPeriodEnd,
+    nextPaymentAt,
     effectiveAt: null,
     requiresPaymentMethod: !paymentMethod,
     lines,

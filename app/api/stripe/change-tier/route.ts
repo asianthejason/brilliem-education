@@ -1,28 +1,6 @@
 import { auth, clerkClient } from "@clerk/nextjs/server";
 import { stripe } from "@/lib/stripe";
-
-type Tier = "free" | "lessons" | "lessons_ai";
-
-function rank(t: Tier) {
-  if (t === "lessons_ai") return 2;
-  if (t === "lessons") return 1;
-  return 0;
-}
-
-function priceIdForTier(tier: Exclude<Tier, "free">) {
-  const lessons =
-    process.env.STRIPE_PRICE_LESSONS ||
-    process.env.STRIPE_LESSONS_PRICE_ID ||
-    process.env.LESSONS_PRICE_ID;
-
-  const lessonsAi =
-    process.env.STRIPE_PRICE_LESSONS_AI_TUTOR || // matches your subscription-intent route
-    process.env.STRIPE_PRICE_LESSONS_AI ||
-    process.env.STRIPE_LESSONS_AI_PRICE_ID ||
-    process.env.LESSONS_AI_PRICE_ID;
-
-  return tier === "lessons" ? lessons : lessonsAi;
-}
+import { intervalFromPriceRecurring, priceIdFor, type BillingInterval, type Tier } from "@/lib/stripePlans";
 
 async function updateClerk(userId: string, patch: Record<string, any>) {
   const client = await clerkClient();
@@ -37,8 +15,9 @@ export async function POST(req: Request) {
   const { userId } = await auth();
   if (!userId) return new Response("Unauthorized", { status: 401 });
 
-  const body = (await req.json().catch(() => null)) as { tier?: Tier } | null;
+  const body = (await req.json().catch(() => null)) as { tier?: Tier; interval?: BillingInterval } | null;
   const desired = body?.tier;
+  const desiredInterval: BillingInterval = body?.interval === "year" ? "year" : "month";
   if (!desired) return new Response("Missing tier", { status: 400 });
 
   const client = await clerkClient();
@@ -46,6 +25,7 @@ export async function POST(req: Request) {
   const meta = (user.unsafeMetadata || {}) as Record<string, any>;
 
   const currentTier = ((meta.tier as Tier | undefined) || "free") as Tier;
+  const currentInterval: BillingInterval = (meta.billingInterval as BillingInterval | undefined) || "month";
   const subId = meta.stripeSubscriptionId as string | undefined;
 
   // If no Stripe subscription exists yet, only allow Free here.
@@ -53,7 +33,9 @@ export async function POST(req: Request) {
     if (desired === "free") {
       await updateClerk(userId, {
         tier: "free",
+        billingInterval: "month",
         pendingTier: undefined,
+        pendingBillingInterval: undefined,
         pendingTierEffective: undefined,
         stripeSubscriptionStatus: "free",
       });
@@ -76,6 +58,8 @@ export async function POST(req: Request) {
   const item = subscription.items.data[0];
   if (!item?.id || !item.price?.id) return new Response("Subscription item missing", { status: 500 });
   const quantity = item.quantity ?? 1;
+
+  const currentSubInterval = intervalFromPriceRecurring((item.price as any)?.recurring);
 
   // Selecting Free = cancel at period end (keep access)
   if (desired === "free") {
@@ -112,14 +96,28 @@ export async function POST(req: Request) {
     return created.id;
   }
 
-  const desiredRank = rank(desired);
-  const currentRank = rank(currentTier);
-
-  const nextPriceId = priceIdForTier(desired as Exclude<Tier, "free">);
+  const nextPriceId = priceIdFor(desired as Exclude<Tier, "free">, desiredInterval);
   if (!nextPriceId) return new Response("Missing Stripe price id env var for desired tier", { status: 500 });
 
-  // DOWNGRADE: schedule for next billing period, keep current access until then
-  if (desiredRank < currentRank) {
+  // Decide upgrade vs downgrade based on whether there is money due NOW.
+  const currentInterval = intervalFromPriceRecurring((item.price as any)?.recurring || null);
+  const desiredPrice = await stripe.prices.retrieve(nextPriceId);
+  const desiredStripeInterval = intervalFromPriceRecurring((desiredPrice as any)?.recurring || null);
+  const intervalChanged = currentInterval !== desiredStripeInterval;
+  const anchorForImmediate = intervalChanged ? "now" : "unchanged";
+
+  const upcoming = await stripe.invoices.retrieveUpcoming({
+    customer: String(subscription.customer),
+    subscription: subId,
+    subscription_items: [{ id: item.id, price: nextPriceId }],
+    subscription_proration_behavior: "create_prorations",
+    subscription_billing_cycle_anchor: anchorForImmediate,
+  } as any);
+
+  const dueNow = Math.max(0, (upcoming.amount_due ?? 0) as number);
+
+  // DOWNGRADE (or any change with no money due now): schedule for next billing period.
+  if (dueNow <= 0) {
     const scheduleId = await getOrCreateScheduleId();
     const schedule = await stripe.subscriptionSchedules.retrieve(scheduleId);
 
@@ -147,7 +145,9 @@ export async function POST(req: Request) {
 
     await updateClerk(userId, {
       tier: currentTier,
+      billingInterval: currentInterval,
       pendingTier: desired,
+      pendingBillingInterval: desiredStripeInterval,
       pendingTierEffective: periodEnd,
       stripeSubscriptionStatus: subscription.status,
       stripeCustomerId: subscription.customer,
@@ -157,14 +157,13 @@ export async function POST(req: Request) {
     return Response.json({ mode: "downgrade_scheduled", effectiveDate: periodEnd });
   }
 
-  // Lateral change or upgrade: apply immediately with proration.
-  // To CHARGE the proration immediately (instead of adding to next invoice),
-  // we create/pay the proration invoice right away.
+  // UPGRADE: apply immediately with proration.
+  // If we are switching monthly <-> yearly, we anchor to now so the next renewal date makes sense.
   const updated = await stripe.subscriptions.update(subId, {
     cancel_at_period_end: false,
     items: [{ id: item.id, price: nextPriceId }],
     proration_behavior: "create_prorations",
-    billing_cycle_anchor: "unchanged",
+    billing_cycle_anchor: anchorForImmediate,
   });
 
   // IMPORTANT: `subscription.update` creates proration adjustments as *pending invoice items*.
@@ -206,7 +205,9 @@ export async function POST(req: Request) {
   // Success: update Clerk immediately
   await updateClerk(userId, {
     tier: desired,
+    billingInterval: desiredStripeInterval,
     pendingTier: undefined,
+    pendingBillingInterval: undefined,
     pendingTierEffective: undefined,
     stripeSubscriptionId: updated.id,
     stripeCustomerId: updated.customer,

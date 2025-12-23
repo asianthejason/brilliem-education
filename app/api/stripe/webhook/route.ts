@@ -1,23 +1,7 @@
 import { headers } from "next/headers";
 import { clerkClient } from "@clerk/nextjs/server";
 import { stripe } from "@/lib/stripe";
-
-function tierFromPriceId(priceId?: string | null) {
-  const lessons =
-    process.env.STRIPE_PRICE_LESSONS ||
-    process.env.STRIPE_LESSONS_PRICE_ID ||
-    process.env.LESSONS_PRICE_ID;
-
-  const lessonsAi =
-    process.env.STRIPE_PRICE_LESSONS_AI_TUTOR ||
-    process.env.STRIPE_PRICE_LESSONS_AI ||
-    process.env.STRIPE_LESSONS_AI_PRICE_ID ||
-    process.env.LESSONS_AI_PRICE_ID;
-
-  if (lessons && priceId === lessons) return "lessons";
-  if (lessonsAi && priceId === lessonsAi) return "lessons_ai";
-  return "free";
-}
+import { intervalFromPriceRecurring, tierFromPriceId, type BillingInterval, type Tier } from "@/lib/stripePlans";
 
 export async function POST(req: Request) {
   const sig = (await headers()).get("stripe-signature");
@@ -43,6 +27,7 @@ export async function POST(req: Request) {
 
       const priceId = sub?.items?.data?.[0]?.price?.id as string | undefined;
       const derivedTier = tierFromPriceId(priceId);
+      const derivedInterval: BillingInterval = intervalFromPriceRecurring(sub?.items?.data?.[0]?.price?.recurring);
 
       const user = await client.users.getUser(clerkUserId);
       const meta = (user.unsafeMetadata || {}) as Record<string, any>;
@@ -51,7 +36,9 @@ export async function POST(req: Request) {
         const nextUnsafe: Record<string, any> = {
           ...meta,
           tier: derivedTier,
+          billingInterval: derivedInterval,
           pendingTier: "free",
+          pendingBillingInterval: "month",
           pendingTierEffective: sub.current_period_end,
           stripeSubscriptionId: sub.id,
           stripeSubscriptionStatus: sub.status,
@@ -65,7 +52,9 @@ export async function POST(req: Request) {
       const nextUnsafe: Record<string, any> = {
         ...meta,
         tier: derivedTier,
+        billingInterval: derivedInterval,
         pendingTier: undefined,
+        pendingBillingInterval: undefined,
         pendingTierEffective: undefined,
         stripeSubscriptionId: sub.id,
         stripeSubscriptionStatus: sub.status,
@@ -88,7 +77,9 @@ export async function POST(req: Request) {
       const nextUnsafe: Record<string, any> = {
         ...meta,
         tier: "free",
+        billingInterval: "month",
         pendingTier: undefined,
+        pendingBillingInterval: undefined,
         pendingTierEffective: undefined,
         stripeSubscriptionId: undefined,
         stripeSubscriptionStatus: "canceled",
