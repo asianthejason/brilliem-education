@@ -1,39 +1,50 @@
 import { auth, clerkClient } from "@clerk/nextjs/server";
 import { stripe } from "@/lib/stripe";
 
-type PaymentMethodSummary =
-  | {
-      hasCustomer: false;
-      hasPaymentMethod: false;
-      nextPaymentAt?: null;
-      nextPaymentAmount?: null;
-      nextPaymentCurrency?: null;
-      cancelsAt?: null;
-    }
-  | {
-      hasCustomer: true;
-      hasPaymentMethod: boolean;
-      brand?: string;
-      last4?: string;
-      expMonth?: number;
-      expYear?: number;
-      nextPaymentAt?: number | null;
-      nextPaymentAmount?: number | null;
-      nextPaymentCurrency?: string | null;
-      cancelsAt?: number | null;
-    };
+/**
+ * Response union used by the Subscription page.
+ *
+ * NOTE: We keep intermediate variables strongly typed as the "customer" variant
+ * once we know a customer exists, to avoid TS widening during object spreads.
+ */
 
-function summarizeCard(pm: any) {
+type PaymentMethodSummaryNoCustomer = {
+  hasCustomer: false;
+  hasPaymentMethod: false;
+  nextPaymentAt: null;
+  nextPaymentAmount: null;
+  nextPaymentCurrency: null;
+  cancelsAt: null;
+};
+
+type PaymentMethodSummaryCustomer = {
+  hasCustomer: true;
+  hasPaymentMethod: boolean;
+  brand?: string;
+  last4?: string;
+  expMonth?: number;
+  expYear?: number;
+  nextPaymentAt: number | null;
+  nextPaymentAmount: number | null;
+  nextPaymentCurrency: string | null;
+  cancelsAt: number | null;
+};
+
+type PaymentMethodSummary = PaymentMethodSummaryNoCustomer | PaymentMethodSummaryCustomer;
+
+function summarizeCard(pm: any): Pick<
+  PaymentMethodSummaryCustomer,
+  "hasPaymentMethod" | "brand" | "last4" | "expMonth" | "expYear"
+> | null {
   const card = pm?.card;
   if (!card) return null;
   return {
-    hasCustomer: true,
     hasPaymentMethod: true,
-    brand: card.brand as string,
-    last4: card.last4 as string,
-    expMonth: card.exp_month as number,
-    expYear: card.exp_year as number,
-  } satisfies PaymentMethodSummary;
+    brand: String(card.brand ?? ""),
+    last4: String(card.last4 ?? ""),
+    expMonth: Number(card.exp_month),
+    expYear: Number(card.exp_year),
+  };
 }
 
 export async function GET() {
@@ -48,10 +59,25 @@ export async function GET() {
   const subscriptionId = meta.stripeSubscriptionId as string | undefined;
 
   if (!customerId) {
-    return Response.json({ hasCustomer: false, hasPaymentMethod: false } satisfies PaymentMethodSummary);
+    const noCustomer: PaymentMethodSummaryNoCustomer = {
+      hasCustomer: false,
+      hasPaymentMethod: false,
+      nextPaymentAt: null,
+      nextPaymentAmount: null,
+      nextPaymentCurrency: null,
+      cancelsAt: null,
+    };
+    return Response.json(noCustomer satisfies PaymentMethodSummary);
   }
 
-  let summary: PaymentMethodSummary = { hasCustomer: true, hasPaymentMethod: false };
+  let summary: PaymentMethodSummaryCustomer = {
+    hasCustomer: true,
+    hasPaymentMethod: false,
+    nextPaymentAt: null,
+    nextPaymentAmount: null,
+    nextPaymentCurrency: null,
+    cancelsAt: null,
+  };
 
   // 1) Try subscription default PM first (most accurate)
   if (subscriptionId) {
@@ -62,7 +88,8 @@ export async function GET() {
 
       const subPM = (sub as any).default_payment_method;
       if (subPM && typeof subPM === "object" && subPM.type === "card") {
-        summary = summarizeCard(subPM) as PaymentMethodSummary;
+        const cardBits = summarizeCard(subPM);
+        if (cardBits) summary = { ...summary, ...cardBits };
       }
 
       // Next payment info for header
@@ -75,10 +102,9 @@ export async function GET() {
           cancelsAt: sub.current_period_end as number,
         };
       } else {
-        // Date
         const nextAt = sub.current_period_end as number;
 
-        // Amount (use upcoming invoice total)
+        // Amount (use upcoming invoice total when available)
         let nextAmt: number | null = null;
         let nextCur: string | null = null;
         try {
@@ -86,8 +112,8 @@ export async function GET() {
             customer: customerId,
             subscription: subscriptionId,
           } as any);
-          nextAmt = upcoming.total ?? null;
-          nextCur = upcoming.currency ?? null;
+          nextAmt = (upcoming.total ?? null) as any;
+          nextCur = (upcoming.currency ?? null) as any;
         } catch {
           // ignore
         }
@@ -113,8 +139,8 @@ export async function GET() {
 
     const custPM = customer?.invoice_settings?.default_payment_method;
     if (custPM && typeof custPM === "object" && custPM.type === "card") {
-      const cardOnly = summarizeCard(custPM) as PaymentMethodSummary;
-      summary = { ...summary, ...cardOnly };
+      const cardBits = summarizeCard(custPM);
+      if (cardBits) summary = { ...summary, ...cardBits };
     }
   } catch {
     // ignore
