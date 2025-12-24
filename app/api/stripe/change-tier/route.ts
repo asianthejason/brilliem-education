@@ -50,9 +50,27 @@ export async function POST(req: Request) {
   }
 
   // Fetch subscription (with schedule + invoice info)
-  const subscription = await stripe.subscriptions.retrieve(subId, {
-    expand: ["latest_invoice.payment_intent", "schedule", "items.data.price"],
-  });
+  const retrieveSub = async () => {
+    return await stripe.subscriptions.retrieve(subId, {
+      expand: ["latest_invoice.payment_intent", "schedule", "items.data.price"],
+    });
+  };
+
+  const scheduleIdFromSubscription = (sub: any): string | null => {
+    const s = sub?.schedule;
+    if (!s) return null;
+    return typeof s === "string" ? s : s.id;
+  };
+
+  let subscription: any = await retrieveSub();
+  // If a previous downgrade created a subscription schedule, Stripe blocks direct cancellation updates.
+  // Any new change supersedes the old schedule, so release it before proceeding.
+  const existingScheduleId = scheduleIdFromSubscription(subscription);
+  if (existingScheduleId) {
+    await stripe.subscriptionSchedules.release(existingScheduleId, { preserve_cancel_date: false });
+    subscription = await retrieveSub();
+  }
+
 
   // Defense-in-depth ownership check
   const metaClerkUserId = subscription.metadata?.clerkUserId;
@@ -90,7 +108,7 @@ export async function POST(req: Request) {
 
   // If there is an existing schedule, re-use it; otherwise create one.
   async function getOrCreateScheduleId(): Promise<string> {
-    const existing = subscription.schedule ? String(subscription.schedule) : null;
+    const existing = scheduleIdFromSubscription(subscription);
     if (existing) return existing;
     const created = await stripe.subscriptionSchedules.create({ from_subscription: subId });
     return created.id;
