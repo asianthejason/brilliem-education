@@ -15,13 +15,17 @@ export async function POST(req: Request) {
   const { userId } = await auth();
   if (!userId) return new Response("Unauthorized", { status: 401 });
 
+  // NOTE: TypeScript does not reliably carry outer-scope narrowing into nested helper functions.
+  // Copy to a new constant so helpers see a definite string.
+  const clerkUserId: string = userId;
+
   const body = (await req.json().catch(() => null)) as { tier?: Tier; interval?: BillingInterval } | null;
   const desired = body?.tier;
   const desiredInterval: BillingInterval = body?.interval === "year" ? "year" : "month";
   if (!desired) return new Response("Missing tier", { status: 400 });
 
   const client = await clerkClient();
-  const user = await client.users.getUser(userId);
+  const user = await client.users.getUser(clerkUserId);
   const meta = (user.unsafeMetadata || {}) as Record<string, any>;
 
   const currentTier = ((meta.tier as Tier | undefined) || "free") as Tier;
@@ -30,7 +34,7 @@ export async function POST(req: Request) {
   // If no Stripe subscription exists yet, only allow Free here.
   if (!subId) {
     if (desired === "free") {
-      await updateClerk(userId, {
+      await updateClerk(clerkUserId, {
         tier: "free",
         billingInterval: "month",
         pendingTier: undefined,
@@ -52,7 +56,7 @@ export async function POST(req: Request) {
 
   // Defense-in-depth ownership check
   const metaClerkUserId = subscription.metadata?.clerkUserId;
-  if (metaClerkUserId && metaClerkUserId !== userId) return new Response("Forbidden", { status: 403 });
+  if (metaClerkUserId && metaClerkUserId !== clerkUserId) return new Response("Forbidden", { status: 403 });
 
   const item = subscription.items.data[0];
   if (!item?.id || !item.price?.id) return new Response("Subscription item missing", { status: 500 });
@@ -67,7 +71,7 @@ export async function POST(req: Request) {
       cancel_at_period_end: true,
     });
 
-    await updateClerk(userId, {
+    await updateClerk(clerkUserId, {
       tier: currentTier,
       pendingTier: "free",
       pendingTierEffective: updated.current_period_end,
@@ -132,7 +136,7 @@ export async function POST(req: Request) {
       ],
     });
 
-    await updateClerk(userId, {
+    await updateClerk(clerkUserId, {
       tier: currentTier,
       billingInterval: currentSubInterval,
       pendingTier: desired,
@@ -209,7 +213,7 @@ export async function POST(req: Request) {
     }
   }
 
-  await updateClerk(userId, {
+    await updateClerk(clerkUserId, {
     tier: desired,
     billingInterval: desiredStripeInterval,
     pendingTier: undefined,
