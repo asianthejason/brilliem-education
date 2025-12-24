@@ -95,6 +95,23 @@ export default function SubscriptionPage() {
   const [pendingEffective, setPendingEffective] = useState<number | null>(
     (user?.unsafeMetadata?.pendingTierEffective as number | undefined) || null
   );
+  // Keep local pending state in sync with Clerk (important on hard refresh where user loads after first render).
+  useEffect(() => {
+    if (!isLoaded || !user) return;
+    const pt = (user.unsafeMetadata?.pendingTier as Tier | undefined) || null;
+    const pi = (user.unsafeMetadata?.pendingBillingInterval as BillingInterval | undefined) || null;
+    const pe = (user.unsafeMetadata?.pendingTierEffective as number | undefined) || null;
+    setPendingTier(pt);
+    setPendingInterval(pi);
+    setPendingEffective(pe);
+  }, [
+    isLoaded,
+    user?.id,
+    user?.unsafeMetadata?.pendingTier,
+    user?.unsafeMetadata?.pendingBillingInterval,
+    user?.unsafeMetadata?.pendingTierEffective,
+  ]);
+
 
   // Plan picker interval (Monthly / Yearly)
   const [billingInterval, setBillingInterval] = useState<BillingInterval>("month");
@@ -493,7 +510,7 @@ export default function SubscriptionPage() {
         }
 
         const data = (await res.json()) as
-          | { mode: "upgraded"; subscriptionId: string; amountDue?: number; currency?: string }
+          | { mode: "upgraded"; amountDue?: number; currency?: string }
           | { mode: "payment_required"; subscriptionId: string; clientSecret: string; amountDue?: number; currency?: string }
           | { mode: "downgrade_scheduled"; effectiveDate: number };
 
@@ -520,11 +537,6 @@ export default function SubscriptionPage() {
           if (result.error) throw new Error(result.error.message || "Payment failed");
           const status = result.paymentIntent?.status;
           if (status === "succeeded" || status === "processing") {
-            // IMPORTANT:
-            // For paid->paid upgrades, the change-tier API returns `payment_required` *before*
-            // writing the new tier into Clerk. After payment succeeds, we must sync from Stripe.
-            await finalizeActivation({ subscriptionId: data.subscriptionId, tier: nextTier }).catch(() => null);
-
             setPendingTier(null);
             setPendingEffective(null);
             setInfo("Payment successful! Your plan was upgraded.");
@@ -540,9 +552,6 @@ export default function SubscriptionPage() {
         }
 
         // upgraded (no extra action)
-        // (safe to sync from Stripe anyway to guarantee Clerk metadata reflects the live subscription)
-        await finalizeActivation({ subscriptionId: data.subscriptionId, tier: nextTier }).catch(() => null);
-
         setPendingTier(null);
         setPendingEffective(null);
         setInfo("Plan updated.");
