@@ -98,7 +98,7 @@ export async function POST(req: Request) {
       stripeSubscriptionId: updated.id,
     });
 
-    return Response.json({ mode: "downgrade_scheduled", effectiveDate: updated.current_period_end });
+    return Response.json({ mode: "downgrade_scheduled", subscriptionId: updated.id, effectiveDate: updated.current_period_end });
   }
 
   // Any paid-tier change should "uncancel" first if the user had scheduled Free.
@@ -165,7 +165,7 @@ export async function POST(req: Request) {
       stripeSubscriptionId: subscription.id,
     });
 
-    return Response.json({ mode: "downgrade_scheduled", effectiveDate: periodEnd });
+    return Response.json({ mode: "downgrade_scheduled", subscriptionId: subscription.id, effectiveDate: periodEnd });
   }
 
   if (forceScheduledDowngrade) {
@@ -183,55 +183,54 @@ export async function POST(req: Request) {
     subscription_billing_cycle_anchor: anchorForImmediate,
   } as any);
 
-  const dueNow = Math.max(0, (upcoming.amount_due ?? 0) as number);
+  // Stripe's upcoming invoice total often includes the *next renewal* line item.
+  // For same-interval changes (billing_cycle_anchor=unchanged), only the proration
+  // delta should be considered "due now".
+  const rawLines = (upcoming.lines?.data || []) as any[];
+  const prorationTotal = rawLines
+    .filter((l: any) => !!l.proration)
+    .reduce((sum: number, l: any) => sum + (typeof l.amount === "number" ? l.amount : 0), 0);
+
+  const dueNow = Math.max(
+    0,
+    (anchorForImmediate === "unchanged" ? prorationTotal : ((upcoming.amount_due ?? 0) as number)) as number,
+  );
 
   // Scheduled change (no money due now)
   if (dueNow <= 0) {
     return await scheduleForPeriodEnd();
   }
 
-  // UPGRADE: apply immediately with proration.
+  // UPGRADE: apply immediately.
+  // Use proration_behavior=always_invoice so Stripe invoices and attempts payment right away,
+  // without us manually creating an invoice (which can accidentally include the next renewal).
   const updated = await stripe.subscriptions.update(subId, {
     cancel_at_period_end: false,
     items: [{ id: item.id, price: nextPriceId }],
-    proration_behavior: "create_prorations",
+    proration_behavior: "always_invoice",
     billing_cycle_anchor: anchorForImmediate,
-  });
+    payment_behavior: "default_incomplete",
+    expand: ["latest_invoice.payment_intent"],
+  } as any);
 
-  // Charge prorations immediately by creating/finalizing/paying an invoice now.
-  let invoice = await stripe.invoices.create({
-    customer: String(updated.customer),
-    subscription: updated.id,
-    auto_advance: false,
-  });
+  const latestInvoice = (updated as any).latest_invoice;
+  const invoiceObj = latestInvoice && typeof latestInvoice === "object" ? latestInvoice : null;
+  const amountDue = typeof invoiceObj?.amount_due === "number" ? (invoiceObj.amount_due as number) : 0;
+  const currency = invoiceObj?.currency ? String(invoiceObj.currency) : undefined;
 
-  if (invoice.status === "draft") {
-    invoice = await stripe.invoices.finalizeInvoice(String(invoice.id), {
-      expand: ["payment_intent"],
+  const pi = invoiceObj?.payment_intent && typeof invoiceObj.payment_intent === "object" ? (invoiceObj.payment_intent as any) : null;
+
+  if (amountDue > 0 && pi?.client_secret && pi?.status && pi.status !== "succeeded" && pi.status !== "processing") {
+    return Response.json({
+      mode: "payment_required",
+      subscriptionId: updated.id,
+      clientSecret: String(pi.client_secret),
+      amountDue,
+      currency,
     });
-  } else {
-    invoice = await stripe.invoices.retrieve(String(invoice.id), { expand: ["payment_intent"] });
   }
 
-  const amountDue = typeof invoice.amount_due === "number" ? invoice.amount_due : 0;
-  const currency = invoice.currency ? String(invoice.currency) : undefined;
-
-  if (amountDue > 0) {
-    invoice = await stripe.invoices.pay(String(invoice.id), { expand: ["payment_intent"] });
-
-    const pi = invoice.payment_intent as any | null;
-    if (pi?.client_secret && pi?.status && pi.status !== "succeeded") {
-      return Response.json({
-        mode: "payment_required",
-        subscriptionId: updated.id,
-        clientSecret: String(pi.client_secret),
-        amountDue,
-        currency,
-      });
-    }
-  }
-
-    await updateClerk(clerkUserId, {
+  await updateClerk(clerkUserId, {
     tier: desired,
     billingInterval: desiredStripeInterval,
     pendingTier: undefined,
@@ -244,6 +243,7 @@ export async function POST(req: Request) {
 
   return Response.json({
     mode: "upgraded",
+    subscriptionId: updated.id,
     amountDue: amountDue > 0 ? amountDue : undefined,
     currency,
   });

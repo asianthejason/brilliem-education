@@ -263,7 +263,18 @@ export async function POST(req: Request) {
     periodEnd: l.period?.end as number | undefined,
   }));
 
-  const dueNow = Math.max(0, (upcoming.amount_due ?? 0) as number);
+  // IMPORTANT:
+  // Stripe's "upcoming" invoice total often includes the *next renewal* line item.
+  // For same-interval changes (billing_cycle_anchor=unchanged), we only want to show the
+  // immediate proration charge/credit that happens *today*.
+  const prorationTotal = rawLines
+    .filter((l: any) => !!l.proration)
+    .reduce((sum: number, l: any) => sum + (typeof l.amount === "number" ? l.amount : 0), 0);
+
+  const dueNow = Math.max(
+    0,
+    (anchorForPreview === "unchanged" ? prorationTotal : ((upcoming.amount_due ?? 0) as number)) as number,
+  );
 
   // Next payment date: if anchored to now, estimate 1 interval from now; else current period end.
   const nowSec = Math.floor(Date.now() / 1000);
@@ -274,6 +285,9 @@ export async function POST(req: Request) {
         desiredPrice.recurring?.interval_count || 1,
       )
     : currentPeriodEnd;
+
+  // The renewal amount is always the full desired price.
+  const nextAmount = desiredUnit;
 
   // If no money is due now, treat as scheduled change (downgrade or even-cost switch).
   if (dueNow <= 0) {
@@ -289,7 +303,7 @@ export async function POST(req: Request) {
       currency: desiredPrice.currency || currency,
       action: "downgrade",
       dueNow: 0,
-      nextAmount: desiredUnit,
+      nextAmount,
       nextPaymentAt: currentPeriodEnd,
       effectiveAt: currentPeriodEnd,
       requiresPaymentMethod: !paymentMethod,
@@ -320,10 +334,12 @@ export async function POST(req: Request) {
     currency,
     action: "upgrade",
     dueNow,
-    nextAmount: 0,
+    nextAmount,
     nextPaymentAt,
     effectiveAt: null,
     requiresPaymentMethod: !paymentMethod,
-    lines,
+    // For same-interval changes, hide the next-renewal line item so users don't think
+    // they're being charged an extra period today.
+    lines: anchorForPreview === "unchanged" ? lines.filter((l) => l.proration) : lines,
   });
 }
