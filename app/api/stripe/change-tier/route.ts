@@ -25,7 +25,6 @@ export async function POST(req: Request) {
   const meta = (user.unsafeMetadata || {}) as Record<string, any>;
 
   const currentTier = ((meta.tier as Tier | undefined) || "free") as Tier;
-  const currentInterval: BillingInterval = (meta.billingInterval as BillingInterval | undefined) || "month";
   const subId = meta.stripeSubscriptionId as string | undefined;
 
   // If no Stripe subscription exists yet, only allow Free here.
@@ -48,7 +47,7 @@ export async function POST(req: Request) {
 
   // Fetch subscription (with schedule + invoice info)
   const subscription = await stripe.subscriptions.retrieve(subId, {
-    expand: ["latest_invoice.payment_intent", "schedule"],
+    expand: ["latest_invoice.payment_intent", "schedule", "items.data.price"],
   });
 
   // Defense-in-depth ownership check
@@ -59,7 +58,8 @@ export async function POST(req: Request) {
   if (!item?.id || !item.price?.id) return new Response("Subscription item missing", { status: 500 });
   const quantity = item.quantity ?? 1;
 
-  const currentSubInterval = intervalFromPriceRecurring((item.price as any)?.recurring);
+  const currentSubInterval = intervalFromPriceRecurring((item.price as any)?.recurring || null);
+  const currentUnit = typeof (item.price as any)?.unit_amount === "number" ? ((item.price as any).unit_amount as number) : 0;
 
   // Selecting Free = cancel at period end (keep access)
   if (desired === "free") {
@@ -84,56 +84,36 @@ export async function POST(req: Request) {
     await stripe.subscriptions.update(subId, { cancel_at_period_end: false });
   }
 
-  // If there is an existing schedule, we will re-use it; otherwise create one.
-  // IMPORTANT: When using from_subscription, you cannot set end_behavior at creation.
+  // If there is an existing schedule, re-use it; otherwise create one.
   async function getOrCreateScheduleId(): Promise<string> {
     const existing = subscription.schedule ? String(subscription.schedule) : null;
     if (existing) return existing;
-
-    const created = await stripe.subscriptionSchedules.create({
-      from_subscription: subId,
-    });
+    const created = await stripe.subscriptionSchedules.create({ from_subscription: subId });
     return created.id;
   }
 
   const nextPriceId = priceIdFor(desired as Exclude<Tier, "free">, desiredInterval);
   if (!nextPriceId) return new Response("Missing Stripe price id env var for desired tier", { status: 500 });
 
-  // Decide upgrade vs downgrade based on whether there is money due NOW.
-  // - If money is due now -> apply immediately with proration.
-  // - If money due is 0 -> schedule the change for next billing period (NO proration).
-  const desiredPrice = await stripe.prices.retrieve(nextPriceId);
-  const desiredStripeInterval = intervalFromPriceRecurring((desiredPrice as any)?.recurring || null);
-  const intervalChanged = currentSubInterval !== desiredStripeInterval;
-  const anchorForImmediate = intervalChanged ? "now" : "unchanged";
+  const desiredPrice = (await stripe.prices.retrieve(nextPriceId)) as any;
+  const desiredStripeInterval = intervalFromPriceRecurring(desiredPrice?.recurring || null);
+  const desiredUnit = typeof desiredPrice?.unit_amount === "number" ? (desiredPrice.unit_amount as number) : 0;
 
-  // IMPORTANT RULE:
-  // If interval is the same AND the desired plan is cheaper than the current plan,
-  // we treat it as a downgrade and we DO NOT prorate (even if a proration preview
-  // would produce tiny residuals like $0.38). We schedule the change for period end.
-  const currentUnit = (item.price as any)?.unit_amount ?? 0;
-  const desiredUnit = (desiredPrice as any)?.unit_amount ?? 0;
-  const isSameIntervalDowngrade = !intervalChanged && desiredUnit < currentUnit;
+  const sameInterval = currentSubInterval === desiredStripeInterval;
+  const intervalChanged = !sameInterval;
 
-  const dueNow = await (async () => {
-    if (isSameIntervalDowngrade) return 0;
-    const upcoming = await stripe.invoices.retrieveUpcoming({
-      customer: String(subscription.customer),
-      subscription: subId,
-      subscription_items: [{ id: item.id, price: nextPriceId }],
-      subscription_proration_behavior: "create_prorations",
-      subscription_billing_cycle_anchor: anchorForImmediate,
-    } as any);
-    return Math.max(0, (upcoming.amount_due ?? 0) as number);
-  })();
+  // CRITICAL RULE:
+  // Same-interval downgrades (cheaper plan) must NOT prorate and must be scheduled for period end.
+  // Stripe can generate tiny positive prorations for downgrades; we ignore them in this case.
+  const forceScheduledDowngrade = sameInterval && desiredUnit > 0 && desiredUnit < currentUnit;
 
-  // Any change with no money due now: schedule for next billing period.
-  if (dueNow <= 0) {
+  // Helper to schedule a change for period end (no proration)
+  async function scheduleForPeriodEnd() {
     const scheduleId = await getOrCreateScheduleId();
     const schedule = await stripe.subscriptionSchedules.retrieve(scheduleId);
 
     const currentPhaseStart = schedule.phases?.[0]?.start_date;
-    if (!currentPhaseStart) return new Response("Subscription schedule has no current phase", { status: 500 });
+    if (!currentPhaseStart) throw new Error("Subscription schedule has no current phase");
 
     const periodEnd = subscription.current_period_end;
 
@@ -141,7 +121,7 @@ export async function POST(req: Request) {
       end_behavior: "release",
       phases: [
         {
-          items: [{ price: String(item.price.id), quantity }],
+          items: [{ price: String((item.price as any).id), quantity }],
           start_date: currentPhaseStart,
           end_date: periodEnd,
         },
@@ -166,8 +146,29 @@ export async function POST(req: Request) {
     return Response.json({ mode: "downgrade_scheduled", effectiveDate: periodEnd });
   }
 
+  if (forceScheduledDowngrade) {
+    return await scheduleForPeriodEnd();
+  }
+
+  // For other changes, decide upgrade vs scheduled change by whether there is money due NOW.
+  const anchorForImmediate = intervalChanged ? "now" : "unchanged";
+
+  const upcoming = await stripe.invoices.retrieveUpcoming({
+    customer: String(subscription.customer),
+    subscription: subId,
+    subscription_items: [{ id: item.id, price: nextPriceId }],
+    subscription_proration_behavior: "create_prorations",
+    subscription_billing_cycle_anchor: anchorForImmediate,
+  } as any);
+
+  const dueNow = Math.max(0, (upcoming.amount_due ?? 0) as number);
+
+  // Scheduled change (no money due now)
+  if (dueNow <= 0) {
+    return await scheduleForPeriodEnd();
+  }
+
   // UPGRADE: apply immediately with proration.
-  // If we are switching monthly <-> yearly, we anchor to now so the next renewal date makes sense.
   const updated = await stripe.subscriptions.update(subId, {
     cancel_at_period_end: false,
     items: [{ id: item.id, price: nextPriceId }],
@@ -175,16 +176,13 @@ export async function POST(req: Request) {
     billing_cycle_anchor: anchorForImmediate,
   });
 
-  // IMPORTANT: `subscription.update` creates proration adjustments as *pending invoice items*.
-  // If we do nothing, Stripe will add those prorations to the *next* renewal invoice.
-  // To charge the prorated difference immediately, we create/finalize/pay an invoice right now.
+  // Charge prorations immediately by creating/finalizing/paying an invoice now.
   let invoice = await stripe.invoices.create({
     customer: String(updated.customer),
     subscription: updated.id,
     auto_advance: false,
   });
 
-  // Finalize so it can be paid.
   if (invoice.status === "draft") {
     invoice = await stripe.invoices.finalizeInvoice(String(invoice.id), {
       expand: ["payment_intent"],
@@ -196,7 +194,6 @@ export async function POST(req: Request) {
   const amountDue = typeof invoice.amount_due === "number" ? invoice.amount_due : 0;
   const currency = invoice.currency ? String(invoice.currency) : undefined;
 
-  // If there is money due, attempt to pay now (uses the default PM; may require SCA).
   if (amountDue > 0) {
     invoice = await stripe.invoices.pay(String(invoice.id), { expand: ["payment_intent"] });
 
@@ -211,7 +208,7 @@ export async function POST(req: Request) {
       });
     }
   }
-  // Success: update Clerk immediately
+
   await updateClerk(userId, {
     tier: desired,
     billingInterval: desiredStripeInterval,
