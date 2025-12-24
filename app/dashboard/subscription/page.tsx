@@ -98,6 +98,15 @@ export default function SubscriptionPage() {
 
   // Plan picker interval (Monthly / Yearly)
   const [billingInterval, setBillingInterval] = useState<BillingInterval>("month");
+  const didInitIntervalRef = useRef(false);
+
+  useEffect(() => {
+    if (didInitIntervalRef.current) return;
+    if (!isLoaded || !user) return;
+    // Default the toggle to the user's current billing interval so "Current" only appears in that view.
+    setBillingInterval(currentInterval);
+    didInitIntervalRef.current = true;
+  }, [isLoaded, user, currentInterval]);
 
   // Global UI state
   const [busy, setBusy] = useState(false);
@@ -722,11 +731,20 @@ export default function SubscriptionPage() {
   );
 
   function isCurrent(t: Tier) {
-    return t !== "none" && t === currentTier;
+    if (t === "none") return false;
+    if (t === "free") return currentTier === "free";
+    // Paid tiers must match BOTH tier + billing interval (monthly vs yearly).
+    return currentTier === t && currentInterval === billingInterval;
   }
 
   function isScheduled(t: Tier) {
-    return !!pendingTier && pendingTier === t;
+    if (!pendingTier) return false;
+    if (t === "none") return false;
+    if (pendingTier !== t) return false;
+    if (t === "free") return true;
+    // Scheduled changes are specific to an interval.
+    if (pendingInterval) return pendingInterval === billingInterval;
+    return true;
   }
 
   return (
@@ -742,7 +760,7 @@ export default function SubscriptionPage() {
 
           <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-700">
             <div>
-              <span className="font-semibold text-slate-900">Current tier:</span> {tierLabel(currentTier)}
+              <span className="font-semibold text-slate-900">Current tier:</span> {tierLabel(currentTier)}{currentTier !== "none" && currentTier !== "free" ? ` (${intervalLabel(currentInterval)})` : ""}
             </div>
             {nextPayText && <div className="mt-1 text-xs text-slate-600">{nextPayText}</div>}
             {pendingText && <div className="mt-1 text-xs text-slate-600">{pendingText}</div>}
