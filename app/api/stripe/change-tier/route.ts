@@ -107,15 +107,25 @@ export async function POST(req: Request) {
   const intervalChanged = currentSubInterval !== desiredStripeInterval;
   const anchorForImmediate = intervalChanged ? "now" : "unchanged";
 
-  const upcoming = await stripe.invoices.retrieveUpcoming({
-    customer: String(subscription.customer),
-    subscription: subId,
-    subscription_items: [{ id: item.id, price: nextPriceId }],
-    subscription_proration_behavior: "create_prorations",
-    subscription_billing_cycle_anchor: anchorForImmediate,
-  } as any);
+  // IMPORTANT RULE:
+  // If interval is the same AND the desired plan is cheaper than the current plan,
+  // we treat it as a downgrade and we DO NOT prorate (even if a proration preview
+  // would produce tiny residuals like $0.38). We schedule the change for period end.
+  const currentUnit = (item.price as any)?.unit_amount ?? 0;
+  const desiredUnit = (desiredPrice as any)?.unit_amount ?? 0;
+  const isSameIntervalDowngrade = !intervalChanged && desiredUnit < currentUnit;
 
-  const dueNow = Math.max(0, (upcoming.amount_due ?? 0) as number);
+  const dueNow = await (async () => {
+    if (isSameIntervalDowngrade) return 0;
+    const upcoming = await stripe.invoices.retrieveUpcoming({
+      customer: String(subscription.customer),
+      subscription: subId,
+      subscription_items: [{ id: item.id, price: nextPriceId }],
+      subscription_proration_behavior: "create_prorations",
+      subscription_billing_cycle_anchor: anchorForImmediate,
+    } as any);
+    return Math.max(0, (upcoming.amount_due ?? 0) as number);
+  })();
 
   // Any change with no money due now: schedule for next billing period.
   if (dueNow <= 0) {

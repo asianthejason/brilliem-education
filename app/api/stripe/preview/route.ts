@@ -1,6 +1,11 @@
 import { auth, clerkClient } from "@clerk/nextjs/server";
 import { stripe } from "@/lib/stripe";
-import { intervalFromPriceRecurring, priceIdFor, type BillingInterval, type Tier } from "@/lib/stripePlans";
+import {
+  intervalFromPriceRecurring,
+  priceIdFor,
+  type BillingInterval,
+  type Tier,
+} from "@/lib/stripePlans";
 
 function summarizeCard(pm: any) {
   const card = pm?.card;
@@ -14,13 +19,21 @@ function summarizeCard(pm: any) {
 }
 
 function addIntervalSeconds(nowSec: number, interval: string, count: number) {
-  // Good-enough estimation for UI preview; Stripe will compute exact period boundaries after activation.
   const day = 24 * 60 * 60;
   if (interval === "day") return nowSec + count * day;
   if (interval === "week") return nowSec + count * 7 * day;
+  // For preview only; Stripe computes exact boundaries.
   if (interval === "month") return nowSec + count * 30 * day;
   if (interval === "year") return nowSec + count * 365 * day;
   return nowSec + 30 * day;
+}
+
+function tierLabel(t: Tier) {
+  return t === "lessons" ? "Lessons" : t === "lessons_ai_tutor" ? "Lessons + AI Tutor" : "Free";
+}
+
+function intervalLabel(i: BillingInterval) {
+  return i === "year" ? "Yearly" : "Monthly";
 }
 
 export async function POST(req: Request) {
@@ -37,7 +50,6 @@ export async function POST(req: Request) {
   const meta = (user.unsafeMetadata || {}) as Record<string, any>;
 
   const currentTier = (meta.tier as Tier | undefined) || "free";
-  const currentInterval: BillingInterval = (meta.billingInterval as BillingInterval | undefined) || "month";
   const customerId = meta.stripeCustomerId as string | undefined;
   const subscriptionId = meta.stripeSubscriptionId as string | undefined;
 
@@ -57,7 +69,7 @@ export async function POST(req: Request) {
   const base = {
     currentTier,
     desiredTier: desired,
-    currentInterval,
+    currentInterval: (meta.billingInterval as BillingInterval | undefined) || "month",
     desiredInterval,
     hasCustomer: !!customerId,
     hasPaymentMethod: !!paymentMethod,
@@ -85,7 +97,7 @@ export async function POST(req: Request) {
     requiresPaymentMethod: false,
   };
 
-  // No Stripe objects yet: preview a signup or a free selection.
+  // No Stripe subscription yet
   if (!subscriptionId) {
     if (desired === "free") {
       return Response.json({
@@ -117,10 +129,10 @@ export async function POST(req: Request) {
       dueNow: unit,
       nextAmount: unit,
       nextPaymentAt,
-      requiresPaymentMethod: !paymentMethod, // if they have no saved card, the client will show card entry
+      requiresPaymentMethod: !paymentMethod,
       lines: [
         {
-          description: `First ${interval}: ${desired === "lessons" ? "Lessons" : "Lessons + AI Tutor"}`,
+          description: `First ${intervalLabel(desiredInterval)}: ${tierLabel(desired)}`,
           amount: unit,
           currency,
           proration: false,
@@ -129,7 +141,7 @@ export async function POST(req: Request) {
     });
   }
 
-  // We have a Stripe subscription: preview upgrade/downgrade/cancel.
+  // We have a Stripe subscription: preview change
   const sub = await stripe.subscriptions.retrieve(subscriptionId, {
     expand: ["items.data.price", "schedule"],
   });
@@ -138,7 +150,7 @@ export async function POST(req: Request) {
   const currencyFromSub = sub.currency || "cad";
   const currentPeriodEnd = sub.current_period_end as number;
 
-  // Switching to Free = cancel at period end (most cases)
+  // Switch to Free = cancel at period end
   if (desired === "free") {
     return Response.json({
       ...base,
@@ -164,23 +176,61 @@ export async function POST(req: Request) {
   const desiredPriceId = priceIdFor(desired, desiredInterval);
   if (!desiredPriceId) return new Response("Missing Stripe price id env var", { status: 500 });
 
-  // Paid -> paid: preview an immediate change with prorations.
-  // If money is due NOW, we treat it as an upgrade (apply immediately).
-  // If money due is 0, we treat it as a downgrade (schedule for next period) and we do NOT prorate.
   const item = sub.items.data[0];
   if (!item) return new Response("Subscription has no items", { status: 400 });
 
-  const currentPrice = (item.price as any) || null;
-  const currentRecurring = currentPrice?.recurring || null;
-  const subInterval = intervalFromPriceRecurring(currentRecurring);
+  const currentPrice = item.price as any;
+  const currentUnit = (currentPrice?.unit_amount ?? 0) as number;
+  const currentStripeInterval = intervalFromPriceRecurring(currentPrice?.recurring || null);
 
-  const desiredPrice = await stripe.prices.retrieve(desiredPriceId);
-  const desiredRecurring = (desiredPrice as any)?.recurring || null;
-  const desiredStripeInterval = intervalFromPriceRecurring(desiredRecurring);
-  const intervalChanged = subInterval !== desiredStripeInterval;
+  const desiredPrice = (await stripe.prices.retrieve(desiredPriceId)) as any;
+  const desiredUnit = (desiredPrice?.unit_amount ?? 0) as number;
+  const desiredStripeInterval = intervalFromPriceRecurring(desiredPrice?.recurring || null);
 
-  // If we're switching monthly <-> yearly, we anchor to now for upgrades so next renewal makes sense.
-  // For same-interval upgrades, keep anchor unchanged.
+  base.currentInterval = currentStripeInterval;
+  base.desiredInterval = desiredStripeInterval;
+
+  const intervalChanged = currentStripeInterval !== desiredStripeInterval;
+
+  // Same-interval downgrades should NOT prorate and should be scheduled.
+  // Interval changes are decided by Stripe's amount_due preview (because the user may owe money now).
+  const isSameIntervalDowngrade = !intervalChanged && desiredUnit < currentUnit;
+
+  if (isSameIntervalDowngrade) {
+    const interval = desiredPrice.recurring?.interval || "month";
+    const intervalCount = desiredPrice.recurring?.interval_count || 1;
+    const nextPeriodEnd = addIntervalSeconds(currentPeriodEnd, interval, intervalCount);
+
+    return Response.json({
+      ...base,
+      currency: desiredPrice.currency || currencyFromSub,
+      action: "downgrade",
+      dueNow: 0,
+      nextAmount: desiredUnit,
+      nextPaymentAt: currentPeriodEnd,
+      effectiveAt: currentPeriodEnd,
+      requiresPaymentMethod: false,
+      lines: [
+        {
+          description: "No charge today (change scheduled for next billing period)",
+          amount: 0,
+          currency: desiredPrice.currency || currencyFromSub,
+          proration: false,
+          periodStart: sub.current_period_start as number,
+          periodEnd: currentPeriodEnd,
+        },
+        {
+          description: `1 × ${tierLabel(desired)} (${intervalLabel(desiredStripeInterval)})`,
+          amount: desiredUnit,
+          currency: desiredPrice.currency || currencyFromSub,
+          proration: false,
+          periodStart: currentPeriodEnd,
+          periodEnd: nextPeriodEnd,
+        },
+      ],
+    });
+  }
+
   const anchorForImmediate = intervalChanged ? "now" : "unchanged";
 
   const upcoming = await stripe.invoices.retrieveUpcoming({
@@ -203,45 +253,39 @@ export async function POST(req: Request) {
 
   const dueNow = Math.max(0, (upcoming.amount_due ?? 0) as number);
 
-  // Update base intervals to reflect what Stripe says (more reliable than stale Clerk metadata)
-  base.currentInterval = subInterval;
-  base.desiredInterval = desiredStripeInterval;
-
-  // If we anchor to now, the next payment should be 1 interval from now (estimated for UI).
   const nowSec = Math.floor(Date.now() / 1000);
   const nextPaymentAt = intervalChanged
     ? addIntervalSeconds(nowSec, desiredPrice.recurring?.interval || "month", desiredPrice.recurring?.interval_count || 1)
     : currentPeriodEnd;
 
-  // If the user owes money now, it's an upgrade (apply immediately). Otherwise schedule it.
+  // Interval-changed downgrades (possible if amount_due is 0) should be scheduled (no proration on our side).
   if (dueNow <= 0) {
-    const unit = desiredPrice.unit_amount ?? 0;
-    const nextAmount = unit;
     const interval = desiredPrice.recurring?.interval || "month";
     const intervalCount = desiredPrice.recurring?.interval_count || 1;
     const nextPeriodEnd = addIntervalSeconds(currentPeriodEnd, interval, intervalCount);
+
     return Response.json({
       ...base,
-      currency: desiredPrice.currency || currency,
+      currency: desiredPrice.currency || currencyFromSub,
       action: "downgrade",
       dueNow: 0,
-      nextAmount,
+      nextAmount: desiredUnit,
       nextPaymentAt: currentPeriodEnd,
       effectiveAt: currentPeriodEnd,
-      requiresPaymentMethod: !paymentMethod,
+      requiresPaymentMethod: false,
       lines: [
         {
-          description: "No charge today (changes take effect next billing period)",
+          description: "No charge today (change scheduled for next billing period)",
           amount: 0,
-          currency: desiredPrice.currency || currency,
+          currency: desiredPrice.currency || currencyFromSub,
           proration: false,
           periodStart: sub.current_period_start as number,
           periodEnd: currentPeriodEnd,
         },
         {
-          description: `1 × ${desired === "lessons" ? "Lessons" : "Lessons + AI Tutor"} (${desiredStripeInterval === "year" ? "Yearly" : "Monthly"})`,
-          amount: unit,
-          currency: desiredPrice.currency || currency,
+          description: `1 × ${tierLabel(desired)} (${intervalLabel(desiredStripeInterval)})`,
+          amount: desiredUnit,
+          currency: desiredPrice.currency || currencyFromSub,
           proration: false,
           periodStart: currentPeriodEnd,
           periodEnd: nextPeriodEnd,
@@ -250,14 +294,12 @@ export async function POST(req: Request) {
     });
   }
 
-  const nextAmount = 0; // renewal is shown via nextPaymentAt and Stripe header; line items already show full picture
-
   return Response.json({
     ...base,
     currency,
     action: "upgrade",
     dueNow,
-    nextAmount,
+    nextAmount: 0,
     nextPaymentAt,
     effectiveAt: null,
     requiresPaymentMethod: !paymentMethod,
