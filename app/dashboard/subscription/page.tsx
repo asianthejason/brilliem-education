@@ -96,6 +96,25 @@ export default function SubscriptionPage() {
     (user?.unsafeMetadata?.pendingTierEffective as number | undefined) || null
   );
 
+  const didInitPendingRef = useRef(false);
+
+  useEffect(() => {
+    if (didInitPendingRef.current) return;
+    if (!isLoaded || !user) return;
+
+    // On hard refresh, `useState(...)` above may initialize while `user` is still undefined.
+    // Sync pending/scheduled fields once the user is available so the UI always shows scheduled changes.
+    const pt = (user?.unsafeMetadata?.pendingTier as Tier | undefined) || null;
+    const pi = (user?.unsafeMetadata?.pendingBillingInterval as BillingInterval | undefined) || null;
+    const pe = (user?.unsafeMetadata?.pendingTierEffective as number | undefined) || null;
+
+    setPendingTier(pt);
+    setPendingInterval(pi);
+    setPendingEffective(pe);
+
+    didInitPendingRef.current = true;
+  }, [isLoaded, user?.id]);
+
   // Plan picker interval (Monthly / Yearly)
   const [billingInterval, setBillingInterval] = useState<BillingInterval>("month");
   const didInitIntervalRef = useRef(false);
