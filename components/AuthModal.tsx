@@ -53,7 +53,7 @@ export function AuthModal({
       if (res.status === "complete") {
         await setActive({ session: res.createdSessionId });
         onClose();
-        router.push("/dashboard");
+        router.replace("/dashboard");
         router.refresh();
         return;
       }
