@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { SignOutTab } from "@/components/SignOutTab";
 import { auth, clerkClient } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
 
@@ -86,6 +87,7 @@ export default async function DashboardLayout({
           {tabs.map((t) => (
             <Tab key={t.href} href={t.href} label={t.label} locked={locked} />
           ))}
+          <SignOutTab />
         </div>
 
         {children}

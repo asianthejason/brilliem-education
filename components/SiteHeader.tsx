@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
-import { SignedIn, SignedOut, UserButton } from "@clerk/nextjs";
+import { SignedIn, SignedOut } from "@clerk/nextjs";
 import { AuthModal } from "@/components/AuthModal";
 
 function Brand() {
@@ -73,10 +73,7 @@ export function SiteHeader() {
               >
                 Dashboard
               </Link>
-              <div className="ml-1">
-                <UserButton />
-              </div>
-            </SignedIn>
+</SignedIn>
           </div>
         </div>
       </header>
