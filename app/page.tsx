@@ -1,9 +1,6 @@
 import Link from "next/link";
-import { auth } from "@clerk/nextjs/server";
-import { redirect } from "next/navigation";
 
 
-export const dynamic = "force-dynamic";
 
 type Testimonial = {
   name: string; // first + last initial
@@ -125,9 +122,7 @@ function SectionHeading({
   );
 }
 
-export default async function HomePage() {
-  const { userId } = await auth();
-  if (userId) redirect("/dashboard");
+export default function HomePage() {
 
   return (
     <main className="bg-white">

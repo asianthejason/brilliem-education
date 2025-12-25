@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { useSignIn } from "@clerk/nextjs";
 import Link from "next/link";
 
@@ -12,7 +11,6 @@ export function AuthModal({
   open: boolean;
   onClose: () => void;
 }) {
-  const router = useRouter();
   const { isLoaded, signIn, setActive } = useSignIn();
 
   const [email, setEmail] = useState("");
@@ -53,8 +51,8 @@ export function AuthModal({
       if (res.status === "complete") {
         await setActive({ session: res.createdSessionId });
         onClose();
-        router.replace("/dashboard");
-        router.refresh();
+        // Full navigation ensures the new Clerk session cookie is included immediately.
+        window.location.assign("/dashboard");
         return;
       }
 
