@@ -20,33 +20,41 @@ function Brand() {
   );
 }
 
+const navLinks = [
+  { href: "/#how-it-works", label: "How it works" },
+  { href: "/#features", label: "What you get" },
+  { href: "/#testimonials", label: "Stories" },
+  { href: "/#faq", label: "FAQ" },
+] as const;
+
 export function SiteHeader() {
   const pathname = usePathname();
-  const onHome = pathname === "/";
   const [open, setOpen] = useState(false);
+
+  // Keep the top nav visible on all pages.
+  // When not on the home page, these links will navigate back to "/" and jump to the section.
+  const showTopNav = true;
 
   return (
     <>
-      <header className="sticky top-0 z-50 border-b border-slate-200/70 bg-white/80 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
-          <Link href="/" aria-label="Brilliem Education home">
+      <header className="sticky top-0 z-50 border-b border-slate-200 bg-white">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4">
+          <Link href="/" className="flex items-center gap-2">
             <Brand />
           </Link>
 
-          {onHome && (
-            <nav className="hidden items-center gap-6 text-sm text-slate-700 md:flex">
-              <a className="hover:text-slate-900" href="#how-it-works">
-                How it works
-              </a>
-              <a className="hover:text-slate-900" href="#features">
-                What you get
-              </a>
-              <a className="hover:text-slate-900" href="#testimonials">
-                Stories
-              </a>
-              <a className="hover:text-slate-900" href="#faq">
-                FAQ
-              </a>
+          {showTopNav && (
+            <nav className="hidden items-center gap-6 text-sm font-medium text-slate-600 md:flex">
+              {navLinks.map((l) => (
+                <Link
+                  key={l.href}
+                  href={l.href}
+                  className="hover:text-slate-900"
+                  prefetch={pathname === "/"}
+                >
+                  {l.label}
+                </Link>
+              ))}
             </nav>
           )}
 
@@ -73,7 +81,7 @@ export function SiteHeader() {
               >
                 Dashboard
               </Link>
-</SignedIn>
+            </SignedIn>
           </div>
         </div>
       </header>
