@@ -84,6 +84,7 @@ export default function SubscriptionPage() {
   // Tier + pending metadata (from Clerk)
   const currentTier = (user?.unsafeMetadata?.tier as Tier | undefined) || "none";
   const currentInterval = ((user?.unsafeMetadata?.billingInterval as BillingInterval | undefined) || "month") as BillingInterval;
+  const [pendingTier, setPendingTier] = useState<Tier | null>((user?.unsafeMetadata?.pendingTier as Tier | undefined) || null);
   const [pendingInterval, setPendingInterval] = useState<BillingInterval | null>(
     ((user?.unsafeMetadata?.pendingBillingInterval as BillingInterval | undefined) || null) as any
   );
