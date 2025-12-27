@@ -273,16 +273,16 @@ export function ProfileEditor({ initial }: ProfileEditorProps) {
 
   // If an existing value is not in our dropdown list (e.g. old freeform value),
   // keep it selectable so the user doesn’t “lose” it.
-  const gradeOptions = React.useMemo(() => {
-    const base = Array.from(GRADE_LEVEL_OPTIONS);
+  const gradeOptions = React.useMemo((): string[] => {
+    const base = Array.from(GRADE_LEVEL_OPTIONS) as string[];
     if (normalizedGrade && !base.includes(normalizedGrade as any)) {
       base.splice(1, 0, normalizedGrade); // right after the empty option
     }
     return base;
   }, [normalizedGrade]);
 
-  const countryOptions = React.useMemo(() => {
-    const base = Array.from(COUNTRY_OPTIONS);
+  const countryOptions = React.useMemo((): string[] => {
+    const base = Array.from(COUNTRY_OPTIONS) as string[];
     if (normalizedCountry && !base.includes(normalizedCountry as any)) {
       base.splice(1, 0, normalizedCountry);
     }
