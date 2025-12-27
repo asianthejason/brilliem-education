@@ -17,7 +17,6 @@ type ProfileEditorProps = {
 };
 
 const GRADE_LEVEL_OPTIONS = [
-  "",
   "Kindergarten",
   "Grade 1",
   "Grade 2",
@@ -31,13 +30,12 @@ const GRADE_LEVEL_OPTIONS = [
   "Grade 10",
   "Grade 11",
   "Grade 12",
-  "Other",
 ] as const;
+
 
 // Alphabetical (human-friendly) list of countries.
 // NOTE: Store the plain name string in Clerk unsafeMetadata.
 const COUNTRY_OPTIONS = [
-  "",
   "Afghanistan",
   "Albania",
   "Algeria",
@@ -273,21 +271,36 @@ export function ProfileEditor({ initial }: ProfileEditorProps) {
 
   // If an existing value is not in our dropdown list (e.g. old freeform value),
   // keep it selectable so the user doesn’t “lose” it.
-  const gradeOptions = React.useMemo((): string[] => {
-    const base = Array.from(GRADE_LEVEL_OPTIONS) as string[];
-    if (normalizedGrade && !base.includes(normalizedGrade as any)) {
-      base.splice(1, 0, normalizedGrade); // right after the empty option
-    }
-    return base;
-  }, [normalizedGrade]);
+const gradeOptions: string[] = React.useMemo(() => {
+  const base = Array.from(GRADE_LEVEL_OPTIONS) as string[];
 
-  const countryOptions = React.useMemo((): string[] => {
-    const base = Array.from(COUNTRY_OPTIONS) as string[];
-    if (normalizedCountry && !base.includes(normalizedCountry as any)) {
-      base.splice(1, 0, normalizedCountry);
-    }
-    return base;
-  }, [normalizedCountry]);
+  // If an existing value is not in our dropdown list (e.g. old freeform value),
+  // keep it selectable so the user doesn’t “lose” it.
+  if (
+    normalizedGrade &&
+    normalizedGrade !== "Other" &&
+    normalizedGrade !== "Optional" &&
+    !base.includes(normalizedGrade)
+  ) {
+    base.unshift(normalizedGrade);
+  }
+
+  return base;
+}, [normalizedGrade]);
+const countryOptions: string[] = React.useMemo(() => {
+  const base = Array.from(COUNTRY_OPTIONS) as string[];
+
+  if (
+    normalizedCountry &&
+    normalizedCountry !== "Optional" &&
+    !base.includes(normalizedCountry)
+  ) {
+    base.unshift(normalizedCountry);
+  }
+
+  return base;
+}, [normalizedCountry]);
+
 
   async function onSave(e: React.FormEvent) {
     e.preventDefault();
@@ -380,12 +393,15 @@ export function ProfileEditor({ initial }: ProfileEditorProps) {
                 onChange={(e) => setGradeLevel(e.target.value)}
                 className="w-full appearance-none rounded-xl border border-slate-200 bg-white px-3 py-2 pr-10 text-sm text-slate-900 outline-none focus:border-slate-400"
               >
-                {gradeOptions.map((opt) => (
-                  <option key={opt || "__empty"} value={opt}>
-                    {opt ? opt : "Optional"}
-                  </option>
-                ))}
-              </select>
+  <option value="" disabled>
+    Select grade level
+  </option>
+  {gradeOptions.map((opt) => (
+    <option key={opt} value={opt}>
+      {opt}
+    </option>
+  ))}
+</select>
               <SelectChevron />
             </div>
           </label>
@@ -431,12 +447,15 @@ export function ProfileEditor({ initial }: ProfileEditorProps) {
               onChange={(e) => setCountry(e.target.value)}
               className="w-full appearance-none rounded-xl border border-slate-200 bg-white px-3 py-2 pr-10 text-sm text-slate-900 outline-none focus:border-slate-400"
             >
-              {countryOptions.map((opt) => (
-                <option key={opt || "__empty"} value={opt}>
-                  {opt ? opt : "Optional"}
-                </option>
-              ))}
-            </select>
+  <option value="" disabled>
+    Select country
+  </option>
+  {countryOptions.map((opt) => (
+    <option key={opt} value={opt}>
+      {opt}
+    </option>
+  ))}
+</select>
             <SelectChevron />
           </div>
         </label>
