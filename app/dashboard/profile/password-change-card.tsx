@@ -76,9 +76,6 @@ export function PasswordChangeCard() {
             className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-400"
             autoComplete="current-password"
           />
-          <span className="text-xs text-slate-500">
-            If you signed up with Google/Apple and never set a password, you can usually leave this blank.
-          </span>
         </label>
 
         <label className="grid gap-1">
@@ -137,9 +134,6 @@ export function PasswordChangeCard() {
           {saving ? "Updating…" : "Update password"}
         </button>
 
-        <div className="text-xs text-slate-500">
-          Note: If this fails due to missing current password, use Clerk’s built-in reset flow on your sign-in page.
-        </div>
       </form>
     </div>
   );
