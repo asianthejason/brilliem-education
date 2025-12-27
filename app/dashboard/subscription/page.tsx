@@ -84,13 +84,36 @@ export default function SubscriptionPage() {
   // Tier + pending metadata (from Clerk)
   const currentTier = (user?.unsafeMetadata?.tier as Tier | undefined) || "none";
   const currentInterval = ((user?.unsafeMetadata?.billingInterval as BillingInterval | undefined) || "month") as BillingInterval;
-  const [pendingTier, setPendingTier] = useState<Tier | null>((user?.unsafeMetadata?.pendingTier as Tier | undefined) || null);
+  const grade = (user?.unsafeMetadata?.grade as string | undefined) || "Not set yet";
+
+  const [pendingTier, setPendingTier] = useState<Tier | null>(
+    ((user?.unsafeMetadata?.pendingTier as Tier | undefined) || null) as any
+  );
   const [pendingInterval, setPendingInterval] = useState<BillingInterval | null>(
     ((user?.unsafeMetadata?.pendingBillingInterval as BillingInterval | undefined) || null) as any
   );
   const [pendingEffective, setPendingEffective] = useState<number | null>(
     (user?.unsafeMetadata?.pendingTierEffective as number | undefined) || null
   );
+
+  const didInitPendingRef = useRef(false);
+
+  useEffect(() => {
+    if (didInitPendingRef.current) return;
+    if (!isLoaded || !user) return;
+
+    // On hard refresh, `useState(...)` above may initialize while `user` is still undefined.
+    // Sync pending/scheduled fields once the user is available so the UI always shows scheduled changes.
+    const pt = (user?.unsafeMetadata?.pendingTier as Tier | undefined) || null;
+    const pi = (user?.unsafeMetadata?.pendingBillingInterval as BillingInterval | undefined) || null;
+    const pe = (user?.unsafeMetadata?.pendingTierEffective as number | undefined) || null;
+
+    setPendingTier(pt);
+    setPendingInterval(pi);
+    setPendingEffective(pe);
+
+    didInitPendingRef.current = true;
+  }, [isLoaded, user?.id]);
 
   // Plan picker interval (Monthly / Yearly)
   const [billingInterval, setBillingInterval] = useState<BillingInterval>("month");
@@ -757,6 +780,9 @@ export default function SubscriptionPage() {
         <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
           <div>
             <h1 className="text-2xl font-bold text-slate-900">Subscription</h1>
+            <p className="mt-2 text-slate-600">
+              Grade level: <span className="font-semibold text-slate-900">{grade}</span>
+            </p>
           </div>
 
           <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-700">
