@@ -733,7 +733,7 @@ export default function SubscriptionPage() {
         title: "Free",
         price: "$0",
         subPrice: null as string | null,
-        features: ["Browse the site", "Access the first lesson in every unit (coming soon)", "Basic tools"],
+        features: ["Browse the content", "Access the first lesson in every unit", "Access to the first assessment in every unit"],
         accent: "from-slate-700 to-slate-900",
       },
       {
@@ -741,7 +741,7 @@ export default function SubscriptionPage() {
         title: "Lessons",
         price: lessonsPrice,
         subPrice: lessonsSub,
-        features: ["Unlimited access to all lessons", "Premium content", "Progress tracking (coming soon)"],
+        features: ["Unlimited access to all lessons", "Unlimited access to all assessments", "Infinite variations of each assessment"],
         accent: "from-indigo-500 to-fuchsia-500",
       },
       {
@@ -749,7 +749,7 @@ export default function SubscriptionPage() {
         title: "Lessons + AI Tutor",
         price: lessonsAiPrice,
         subPrice: lessonsAiSub,
-        features: ["Unlimited lessons", "AI Tutor chat + photo homework help", "Priority features (coming soon)"],
+        features: ["Everything in the Lessons plan", "Step by step AI Tutor homework support by text or photo", "AI Lesson suggestion for homework help"],
         accent: "from-emerald-500 to-cyan-500",
       },
       ];
@@ -780,6 +780,7 @@ export default function SubscriptionPage() {
         <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
           <div>
             <h1 className="text-2xl font-bold text-slate-900">Subscription</h1>
+            <p className="mt-2 text-slate-600">A subscription for every needs</p>
           </div>
 
           <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-700">
