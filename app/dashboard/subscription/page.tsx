@@ -741,7 +741,7 @@ export default function SubscriptionPage() {
         title: "Lessons",
         price: lessonsPrice,
         subPrice: lessonsSub,
-        features: ["Unlimited access to all lessons", "Unlimited access to all assessments", "Infinite variations of each assessment"],
+        features: ["Unlimited access to all lessons", "Unlimited access to all assessments", "Infinite variations of each assessment", "3 AI Questions per day trial"],
         accent: "from-indigo-500 to-fuchsia-500",
       },
       {
