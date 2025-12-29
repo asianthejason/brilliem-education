@@ -774,6 +774,41 @@ export default function SubscriptionPage() {
     return true;
   }
 
+  async function cancelPlanChange() {
+    if (!user) return;
+    if (busy) return;
+
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+
+    try {
+      const res = await fetch("/api/stripe/cancel-plan-change", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(text || "Failed to cancel scheduled change");
+      }
+
+      setPendingTier(null);
+      setPendingInterval(null);
+      setPendingEffective(null);
+      setInfo("Scheduled change canceled. Your current plan will renew as usual.");
+
+      await refreshClerkTier();
+      await fetchBillingInfo();
+
+      hardRefreshSelf("canceled=1");
+    } catch (e: any) {
+      setError(e?.message || "Failed to cancel scheduled change");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="grid gap-6">
       <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -850,7 +885,8 @@ export default function SubscriptionPage() {
 
         <div className="mt-6 grid gap-4 md:grid-cols-3">
           {tiers.map((t) => {
-            const disabled = busy || !canPay || isCurrent(t.id) || isScheduled(t.id);
+            const scheduled = isScheduled(t.id);
+            const disabled = busy || (scheduled ? false : (!canPay || isCurrent(t.id)));
             return (
               <div key={t.id} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="flex items-center justify-between gap-3">
@@ -881,13 +917,17 @@ export default function SubscriptionPage() {
 
                 <button
                   disabled={disabled}
-                  onClick={() => openConfirm(t.id)}
+                  onClick={() => (scheduled ? cancelPlanChange() : openConfirm(t.id))}
                   className={cx(
                     "mt-5 w-full rounded-2xl px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition",
-                    disabled ? "bg-slate-300" : `bg-gradient-to-r ${t.accent} hover:brightness-110`
+                    disabled
+                      ? "bg-slate-300"
+                      : scheduled
+                        ? "bg-red-600 hover:bg-red-700"
+                        : `bg-gradient-to-r ${t.accent} hover:brightness-110`
                   )}
                 >
-                  {isCurrent(t.id) ? "Selected" : isScheduled(t.id) ? "Scheduled" : "Change to this plan"}
+                  {isCurrent(t.id) ? "Selected" : scheduled ? "Cancel plan change" : "Change to this plan"}
                 </button>
 
                 {(currentTier === "lessons_ai" || currentTier === "lessons") && (t.id === "free" || t.id === "lessons") && (
