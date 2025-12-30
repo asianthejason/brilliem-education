@@ -51,7 +51,6 @@ function buildUserContent(text: string, imageDataUrl?: string | null) {
   const cleaned = text?.trim() || "";
   if (cleaned) content.push({ type: "input_text", text: cleaned });
   if (imageDataUrl) {
-    // Responses API image input accepts image_url (data URL is fine). Avoid extra fields for compatibility.
     content.push({ type: "input_image", image_url: imageDataUrl });
   }
   if (content.length === 0) content.push({ type: "input_text", text: "(no text provided)" });
@@ -89,8 +88,7 @@ export async function POST(req: Request) {
     problem: string;
     topics: string[];
     grade_level: "elementary" | "middle" | "high" | "university" | "unknown";
-    // Always present (empty string when is_math=true) to satisfy strict JSON schema requirements.
-    reason_if_not_math: string;
+    reason_if_not_math?: string;
   };
 
   const gateModel = process.env.OPENAI_AI_TUTOR_GATE_MODEL || "gpt-4o-mini";
@@ -100,8 +98,7 @@ export async function POST(req: Request) {
     instructions:
       "You are a strict classifier for a math-only tutoring app. " +
       "If the user provides an image, read it and transcribe the math problem. " +
-      "Return JSON only. If the request is not a math problem (including non-math homework, coding, writing, general chat), set is_math=false. " +
-      "Always include reason_if_not_math as a string (empty string if is_math=true).",
+      "Return JSON only. If the request is not a math problem (including non-math homework, coding, writing, general chat), set is_math=false.",
     input: [
       {
         role: "user",
@@ -126,7 +123,6 @@ export async function POST(req: Request) {
             },
             reason_if_not_math: { type: "string" },
           },
-          // With strict JSON schema, `required` must include *every* key in `properties`.
           required: ["is_math", "problem", "topics", "grade_level", "reason_if_not_math"],
         },
       },
@@ -136,8 +132,16 @@ export async function POST(req: Request) {
   const gateText = extractOutputText(gateResp);
   const gate = safeJsonParse<Gate>(gateText);
 
+  // If the gate returned an empty problem but the user typed text, fall back to the raw text.
+  if (gate && (!gate.problem || !gate.problem.trim()) && text.trim()) {
+    gate.problem = text.trim();
+  }
+
   if (!gate || !gate.problem?.trim()) {
-    return Response.json({ ok: false, message: "I couldn't read that. Try typing the question or uploading a clearer photo." }, { status: 400 });
+    return Response.json(
+      { ok: false, message: "I couldn't read that. Try typing the question or uploading a clearer photo." },
+      { status: 400 }
+    );
   }
 
   if (!gate.is_math) {
@@ -160,8 +164,7 @@ export async function POST(req: Request) {
   type Solve = {
     finalAnswer: string;
     steps: string[];
-    // In strict JSON schema mode, these must always be present.
-    lessonRecommendations: Array<{ title: string; url: string; why: string; difficulty: string }>;
+    lessonRecommendations: Array<{ title: string; url: string; why?: string; difficulty?: string }>;
     displayText: string;
   };
 
@@ -185,9 +188,7 @@ export async function POST(req: Request) {
     "Rules:\n" +
     "- Only answer math problems. If the user tries to change topic, refuse and ask for a math question.\n" +
     "- Be accurate. Use the python tool (Code Interpreter) to verify arithmetic/algebra whenever helpful.\n" +
-    "- Output JSON that matches the schema exactly.\n" +
-    "- Always include lessonRecommendations items with title, url, why, difficulty (use empty strings if unknown).\n\n" +
-    `Mode: ${mode}. ${modeInstruction}` +
+    `- Output JSON that matches the schema exactly.\n\nMode: ${mode}. ${modeInstruction}` +
     lessonBlock;
 
   const inputMessages: any[] = [];
@@ -196,10 +197,12 @@ export async function POST(req: Request) {
   for (const h of history) {
     const t = h.text?.trim();
     if (!t) continue;
-    inputMessages.push({
-      role: h.role,
-      content: [{ type: "input_text", text: t }],
-    });
+    const partType = h.role === "assistant" ? "output_text" : "input_text";
+inputMessages.push({
+  role: h.role,
+  content: [{ type: partType, text: t }],
+});
+
   }
 
   // Current question (from gate transcription + optional original).
@@ -234,7 +237,6 @@ export async function POST(req: Request) {
                   why: { type: "string" },
                   difficulty: { type: "string" },
                 },
-                // With strict JSON schema, `required` must include every property key.
                 required: ["title", "url", "why", "difficulty"],
               },
             },
