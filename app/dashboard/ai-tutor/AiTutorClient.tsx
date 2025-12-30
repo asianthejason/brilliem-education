@@ -40,8 +40,7 @@ type ChatSession = {
   id: string;
   title: string;
   createdAt: number;
-  mode: Mode;
-  modeLocked: boolean; // lock after first user question
+  mode: Mode; // 🔒 locked per chat
   messages: ChatMsg[];
 };
 
@@ -78,7 +77,7 @@ function defaultAssistantGreeting(): ChatMsg {
   return {
     id: uid(),
     role: "assistant",
-    text: "Ask me a math or science question (type it, or upload a photo). I can do answer-only, full solutions, or step-by-step.",
+    text: "Ask me a math question (type it, or upload a photo). I can do answer-only, full solutions, or step-by-step.",
   };
 }
 
@@ -88,7 +87,6 @@ function makeNewChat(mode: Mode): ChatSession {
     title: "New chat",
     createdAt: Date.now(),
     mode,
-    modeLocked: false,
     messages: [defaultAssistantGreeting()],
   };
 }
@@ -110,13 +108,11 @@ function normalizeLoadedChats(raw: any): ChatSession[] | null {
       const mode: Mode =
         c.mode === "answer_only" || c.mode === "full_solution" || c.mode === "stepwise" ? c.mode : "stepwise";
       const messages: ChatMsg[] = Array.isArray(c.messages) ? c.messages : [defaultAssistantGreeting()];
-      const modeLocked = typeof c.modeLocked === "boolean" ? c.modeLocked : messages.some((m: any) => m.role === "user");
       return {
         id: typeof c.id === "string" ? c.id : uid(),
         title: typeof c.title === "string" ? c.title : "New chat",
         createdAt: typeof c.createdAt === "number" ? c.createdAt : Date.now(),
         mode,
-        modeLocked,
         messages,
       } as ChatSession;
     })
@@ -184,7 +180,7 @@ export function AiTutorClient() {
   const messages = activeChat?.messages || [];
 
   // Chat is "started" once the user has sent at least 1 message.
-  const chatLocked = useMemo(() => activeChat.modeLocked || messages.some((m) => m.role === "user"), [activeChat.modeLocked, messages]);
+  const chatLocked = useMemo(() => messages.some((m) => m.role === "user"), [messages]);
 
   // Keep new-chat mode aligned to active chat when switching chats (so "New" creates same mode by default)
   useEffect(() => {
@@ -302,12 +298,7 @@ export function AiTutorClient() {
     const userText = input.trim();
     const userMsg: ChatMsg = { id: uid(), role: "user", text: userText || undefined, imageDataUrl: imageDataUrl || undefined };
 
-    const hadUserMsg = activeChat.messages.some((m) => m.role === "user");
-
     updateActiveChatMessages((prev) => [...prev, userMsg]);
-    if (!hadUserMsg) {
-      setChats((prev) => prev.map((c) => (c.id === activeChat.id ? { ...c, modeLocked: true } : c)));
-    }
     if (userText) maybeSetChatTitleFromFirstUserMessage(userText);
 
     setInput("");
@@ -404,11 +395,16 @@ export function AiTutorClient() {
   }
 
   function onSelectMode(m: Mode) {
-    // Lock mode once the first question is asked. Start a new chat to change the mode.
+    // Once the user has asked the first question in this chat, keep the mode fixed
+    // to prevent old messages from reformatting.
     if (chatLocked) return;
 
+    // Allow setting the mode for this (empty) chat AND as the default for new chats.
     setChats((prev) =>
-      prev.map((c) => (c.id === activeChat.id ? { ...c, mode: m, modeLocked: false } : c))
+      prev.map((c) => {
+        if (c.id !== activeChat.id) return c;
+        return { ...c, mode: m };
+      })
     );
     setNewChatMode(m);
   }
@@ -420,7 +416,7 @@ export function AiTutorClient() {
         <div>
           <h1 className="text-xl font-bold text-slate-900">AI Tutor</h1>
           <p className="mt-1 text-sm text-slate-600">
-            Math & science homework help (type a question or upload a photo). If you ask a non-math/science question, it will be rejected.
+            Math & science homework help (type a question or upload a photo). If you ask something outside math/science, it will be rejected.
           </p>
           {chatLocked ? (
             <div className="mt-2 text-xs text-slate-500">
@@ -432,16 +428,16 @@ export function AiTutorClient() {
         </div>
 
         <div className="flex items-center gap-2">
-          <div title={chatLocked ? "Start a new chat to change the mode." : undefined} className="rounded-full border border-slate-200 bg-white p-1 text-sm">
+          <div className="rounded-full border border-slate-200 bg-white p-1 text-sm">
             {(["answer_only", "full_solution", "stepwise"] as Mode[]).map((m) => (
               <button
                 key={m}
                 type="button"
                 onClick={() => onSelectMode(m)}
-                disabled={chatLocked && m !== activeChat.mode}
                 className={`rounded-full px-3 py-1.5 font-semibold ${
                   activeChat.mode === m ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-50"
-                } ${chatLocked && m !== activeChat.mode ? "opacity-60 cursor-not-allowed hover:bg-transparent" : ""}`}
+                } ${chatLocked && m !== activeChat.mode ? "opacity-50 cursor-not-allowed hover:bg-transparent" : ""}`}
+                title={chatLocked && m !== activeChat.mode ? "Start a new chat to change the mode." : modeLabel(m)}
               >
                 {modeLabel(m)}
               </button>
@@ -624,7 +620,7 @@ export function AiTutorClient() {
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={onComposerKeyDown}
                 rows={2}
-                placeholder="Type your math or science question here…"
+                placeholder="Type your math question here…"
                 className="w-full resize-none rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none focus:border-slate-400"
                 disabled={busy}
               />
@@ -653,7 +649,7 @@ export function AiTutorClient() {
               </div>
 
               <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900">
-                <span className="font-semibold">Note:</span> For best results, upload a clear photo (good lighting, not rotated). The tutor will refuse non-math/science questions.
+                <span className="font-semibold">Note:</span> For best results, upload a clear photo (good lighting, not rotated). The tutor will refuse non-math/non-science questions.
               </div>
             </div>
           </div>
