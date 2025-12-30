@@ -107,7 +107,7 @@ export function PasswordChangeCard() {
             onChange={(e) => setSignOutOtherSessions(e.target.checked)}
             className="h-4 w-4 rounded border-slate-300"
           />
-          Sign out of other sessions
+          Sign out of other devices
         </label>
 
         {(error || success) && (
