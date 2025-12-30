@@ -1,51 +1,64 @@
+/* eslint-disable @next/next/no-img-element */
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
-type Mode = "answer_only" | "full_solution" | "stepwise";
+type Mode = "answer_only" | "full_solution" | "step_by_step";
 
-type LessonRec = {
+type Lesson = {
   title: string;
   url: string;
-  why?: string;
-  difficulty?: string;
+  description?: string;
+  tags?: string[];
 };
 
-type ChatMsg =
-  | { id: string; role: "user"; text?: string; imageDataUrl?: string }
-  | {
-      id: string;
-      role: "assistant";
-      text: string;
-      steps?: string[];
-      finalAnswer?: string;
-      lessons?: LessonRec[];
-      stepRevealCount?: number;
-    };
-
-type HistoryItem = { role: "user" | "assistant"; text: string };
-
-type ApiResult = {
-  finalAnswer: string;
+type ApiResponse = {
+  ok: boolean;
+  allowed?: boolean;
+  subject?: string;
+  mode?: Mode;
+  finalAnswer?: string;
   steps?: string[];
-  lessons?: LessonRec[];
-  displayText?: string;
+  fullSolution?: string;
+  refusal?: string;
+  relevantLessons?: Lesson[];
+  error?: string;
 };
 
-type ApiResponse =
-  | { ok: true; result: ApiResult }
-  | { ok: false; message: string; refusal?: boolean };
+type ChatMessage =
+  | { role: "user"; text: string }
+  | {
+      role: "assistant";
+      allowed: boolean;
+      subject: string;
+      mode: Mode;
+      finalAnswer: string;
+      steps: string[];
+      fullSolution: string;
+      refusal: string;
+      relevantLessons: Lesson[];
+    };
 
 type ChatSession = {
   id: string;
   title: string;
   createdAt: number;
-  mode: Mode; // 🔒 locked per chat
-  messages: ChatMsg[];
+  lockedMode: Mode | null; // locks after first send
+  messages: ChatMessage[];
 };
 
-function uid() {
-  return Math.random().toString(16).slice(2) + Date.now().toString(16);
+const LS_KEY = "brilliem_ai_tutor_chats_v1";
+
+function formatTime(ts: number) {
+  try {
+    return new Date(ts).toLocaleString();
+  } catch {
+    return "";
+  }
+}
+
+function makeId() {
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
 function modeLabel(m: Mode) {
@@ -54,606 +67,443 @@ function modeLabel(m: Mode) {
   return "Step-by-step";
 }
 
-function modeShort(m: Mode) {
-  if (m === "answer_only") return "A";
-  if (m === "full_solution") return "F";
-  return "S";
-}
-
-function isProbablyEmpty(s: string) {
-  return s.trim().length === 0;
-}
-
-async function fileToDataUrl(file: File): Promise<string> {
-  return await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("Failed to read file"));
-    reader.onload = () => resolve(String(reader.result || ""));
-    reader.readAsDataURL(file);
-  });
-}
-
-function defaultAssistantGreeting(): ChatMsg {
-  return {
-    id: uid(),
-    role: "assistant",
-    text: "Ask me a math question (type it, or upload a photo). I can do answer-only, full solutions, or step-by-step.",
-  };
-}
-
-function makeNewChat(mode: Mode): ChatSession {
-  return {
-    id: uid(),
-    title: "New chat",
-    createdAt: Date.now(),
-    mode,
-    messages: [defaultAssistantGreeting()],
-  };
-}
-
-function titleFromUserText(text: string) {
-  const t = text.trim().replace(/\s+/g, " ");
-  if (!t) return "New chat";
-  return t.length > 36 ? t.slice(0, 36) + "…" : t;
-}
-
-const STORAGE_KEY = "brilliem_ai_tutor_chats_v2";
-
-function normalizeLoadedChats(raw: any): ChatSession[] | null {
-  if (!Array.isArray(raw) || raw.length === 0) return null;
-  // Backward-compatible: old chats might not have `mode`
-  const out: ChatSession[] = raw
-    .map((c: any) => {
-      if (!c || typeof c !== "object") return null;
-      const mode: Mode =
-        c.mode === "answer_only" || c.mode === "full_solution" || c.mode === "stepwise" ? c.mode : "stepwise";
-      const messages: ChatMsg[] = Array.isArray(c.messages) ? c.messages : [defaultAssistantGreeting()];
-      return {
-        id: typeof c.id === "string" ? c.id : uid(),
-        title: typeof c.title === "string" ? c.title : "New chat",
-        createdAt: typeof c.createdAt === "number" ? c.createdAt : Date.now(),
-        mode,
-        messages,
-      } as ChatSession;
-    })
-    .filter(Boolean) as ChatSession[];
-  return out.length ? out : null;
-}
-
-export function AiTutorClient() {
-  const [input, setInput] = useState("");
-  const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
+export default function AiTutorClient() {
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [activeId, setActiveId] = useState<string>("");
+  const [draft, setDraft] = useState("");
+  const [selectedMode, setSelectedMode] = useState<Mode>("step_by_step");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
 
-  // Default mode for new chats (user can pick in header; applied when new chat is created)
-  const [newChatMode, setNewChatMode] = useState<Mode>("stepwise");
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
 
-  const [chats, setChats] = useState<ChatSession[]>(() => [makeNewChat("stepwise")]);
-  const [activeChatId, setActiveChatId] = useState<string>(() => "");
+  const active = useMemo(
+    () => sessions.find((s) => s.id === activeId) || null,
+    [sessions, activeId]
+  );
 
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const scrollerRef = useRef<HTMLDivElement | null>(null);
-  const prevMsgCountRef = useRef<number>(0);
-
-  // Load chats from localStorage
+  // Load from localStorage
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) {
-        const first = makeNewChat("stepwise");
-        setChats([first]);
-        setActiveChatId(first.id);
-        setNewChatMode(first.mode);
-        return;
+      const raw = localStorage.getItem(LS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as ChatSession[];
+        if (Array.isArray(parsed) && parsed.length) {
+          setSessions(parsed);
+          setActiveId(parsed[0].id);
+          return;
+        }
       }
-      const parsed = normalizeLoadedChats(JSON.parse(raw));
-      if (!parsed) {
-        const first = makeNewChat("stepwise");
-        setChats([first]);
-        setActiveChatId(first.id);
-        setNewChatMode(first.mode);
-        return;
-      }
-      setChats(parsed);
-      setActiveChatId(parsed[0].id);
-      setNewChatMode(parsed[0].mode);
-    } catch {
-      const first = makeNewChat("stepwise");
-      setChats([first]);
-      setActiveChatId(first.id);
-      setNewChatMode(first.mode);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Persist chats to localStorage
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(chats));
     } catch {
       // ignore
     }
-  }, [chats]);
 
-  const activeChat = useMemo(() => chats.find((c) => c.id === activeChatId) || chats[0], [chats, activeChatId]);
-  const messages = activeChat?.messages || [];
+    const first: ChatSession = {
+      id: makeId(),
+      title: "New chat",
+      createdAt: Date.now(),
+      lockedMode: null,
+      messages: [],
+    };
+    setSessions([first]);
+    setActiveId(first.id);
+  }, []);
 
-  // Chat is "started" once the user has sent at least 1 message.
-  const chatLocked = useMemo(() => messages.some((m) => m.role === "user"), [messages]);
-
-  // Keep new-chat mode aligned to active chat when switching chats (so "New" creates same mode by default)
+  // Persist
   useEffect(() => {
-    if (activeChat?.mode) setNewChatMode(activeChat.mode);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeChatId]);
+    try {
+      localStorage.setItem(LS_KEY, JSON.stringify(sessions));
+    } catch {
+      // ignore
+    }
+  }, [sessions]);
 
-  // Auto-scroll to bottom when messages grow
+  // Auto-scroll
   useEffect(() => {
-    const count = messages.length;
-    const prev = prevMsgCountRef.current;
-    prevMsgCountRef.current = count;
+    if (!chatScrollRef.current) return;
+    chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+  }, [active?.messages.length]);
 
-    if (count > prev) {
-      const el = scrollerRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    }
-  }, [messages.length, messages]);
-
-  const history: HistoryItem[] = useMemo(() => {
-    const trimmed = messages
-      .map((m) => ({
-        role: m.role,
-        text: m.role === "user" ? (m.text || "") : (m as any).text,
-      }))
-      .filter((m) => !isProbablyEmpty(m.text));
-    return trimmed.slice(-8);
-  }, [messages]);
-
-  function updateActiveChatMessages(updater: (prev: ChatMsg[]) => ChatMsg[]) {
-    setChats((prevChats) =>
-      prevChats.map((c) => {
-        if (c.id !== activeChat.id) return c;
-        return { ...c, messages: updater(c.messages) };
-      })
-    );
+  function updateActive(updater: (s: ChatSession) => ChatSession) {
+    setSessions((prev) => prev.map((s) => (s.id === activeId ? updater(s) : s)));
   }
 
-  function maybeSetChatTitleFromFirstUserMessage(userText: string) {
-    setChats((prevChats) =>
-      prevChats.map((c) => {
-        if (c.id !== activeChat.id) return c;
-        if (c.title !== "New chat") return c;
-        return { ...c, title: titleFromUserText(userText) };
-      })
-    );
-  }
-
-  function newChat(mode?: Mode) {
-    const m = mode || newChatMode;
-    const c = makeNewChat(m);
-    setChats((prev) => [c, ...prev]);
-    setActiveChatId(c.id);
-    setInput("");
-    setError(null);
+  function startNewChat() {
+    const session: ChatSession = {
+      id: makeId(),
+      title: "New chat",
+      createdAt: Date.now(),
+      lockedMode: null,
+      messages: [],
+    };
+    setSessions((prev) => [session, ...prev]);
+    setActiveId(session.id);
+    setDraft("");
     setImageDataUrl(null);
-    if (fileInputRef.current) fileInputRef.current.value = "";
-    setTimeout(() => {
-      const el = scrollerRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    }, 0);
   }
 
-  function deleteChat(chatId: string) {
-    setChats((prev) => {
-      const next = prev.filter((c) => c.id !== chatId);
-      if (next.length === 0) {
-        const c = makeNewChat("stepwise");
-        setActiveChatId(c.id);
-        setNewChatMode(c.mode);
-        return [c];
-      }
-      if (activeChatId === chatId) {
-        setActiveChatId(next[0].id);
-        setNewChatMode(next[0].mode);
-      }
-      return next;
-    });
-  }
-
-  async function onPickImage(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    if (!f) return;
-
-    if (!/^image\//.test(f.type)) {
-      setError("Please upload an image file.");
-      e.target.value = "";
-      return;
-    }
-
-    if (f.size > 2.5 * 1024 * 1024) {
-      setError("That image is a bit large. Please upload an image under ~2.5MB.");
-      e.target.value = "";
-      return;
-    }
-
-    setError(null);
-    const dataUrl = await fileToDataUrl(f);
-    setImageDataUrl(dataUrl);
-  }
-
-  function clearImage() {
+  function onPickSession(id: string) {
+    setActiveId(id);
+    setDraft("");
     setImageDataUrl(null);
-    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function handleModeClick(mode: Mode) {
+    if (!active) return;
+    if (active.lockedMode) return;
+    setSelectedMode(mode);
+  }
+
+  function lockModeIfNeeded(): Mode {
+    const modeToUse: Mode = active?.lockedMode || selectedMode;
+    if (active && !active.lockedMode) {
+      updateActive((s) => ({ ...s, lockedMode: modeToUse }));
+    }
+    return modeToUse;
   }
 
   async function send() {
-    setError(null);
+    if (!active || busy) return;
+    const text = draft.trim();
+    if (!text && !imageDataUrl) return;
 
-    if (!imageDataUrl && isProbablyEmpty(input)) {
-      setError("Type a math question or upload a photo.");
-      return;
-    }
+    const modeToUse = lockModeIfNeeded();
 
-    const userText = input.trim();
-    const userMsg: ChatMsg = { id: uid(), role: "user", text: userText || undefined, imageDataUrl: imageDataUrl || undefined };
+    const title =
+      active.messages.length === 0
+        ? (text || "Photo question").slice(0, 40)
+        : active.title;
 
-    updateActiveChatMessages((prev) => [...prev, userMsg]);
-    if (userText) maybeSetChatTitleFromFirstUserMessage(userText);
+    updateActive((s) => ({
+      ...s,
+      title,
+      messages: [...s.messages, { role: "user", text: text || "📷 Photo question" }],
+    }));
 
-    setInput("");
-    clearImage();
-
+    setDraft("");
     setBusy(true);
+
     try {
       const res = await fetch("/api/ai-tutor", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mode: activeChat.mode, // 🔒 per-chat mode
-          text: userMsg.text || "",
-          imageDataUrl: userMsg.imageDataUrl || null,
-          history,
-        }),
+        body: JSON.stringify({ message: text, mode: modeToUse, imageDataUrl }),
       });
 
-      const data = (await res.json().catch(() => null)) as ApiResponse | null;
-      if (!data || !data.ok) {
-        const msg = data?.message || `Request failed (${res.status}).`;
-        updateActiveChatMessages((prev) => [...prev, { id: uid(), role: "assistant", text: msg }]);
-        return;
-      }
+      const data = (await res.json().catch(() => ({}))) as ApiResponse;
 
-      const r = data.result;
-
-      if (activeChat.mode === "stepwise" && r.steps && r.steps.length > 0) {
-        updateActiveChatMessages((prev) => [
-          ...prev,
-          {
-            id: uid(),
-            role: "assistant",
-            text: r.displayText || "Here’s the first step.",
-            steps: r.steps,
-            finalAnswer: r.finalAnswer,
-            lessons: r.lessons,
-            stepRevealCount: 1,
-          },
-        ]);
+      if (!res.ok || !data.ok) {
+        updateActive((s) => ({
+          ...s,
+          messages: [
+            ...s.messages,
+            {
+              role: "assistant",
+              allowed: false,
+              subject: "other",
+              mode: modeToUse,
+              finalAnswer: "",
+              steps: [],
+              fullSolution: "",
+              refusal: data.error || `Request failed (${res.status}).`,
+              relevantLessons: [],
+            },
+          ],
+        }));
       } else {
-        updateActiveChatMessages((prev) => [
-          ...prev,
-          {
-            id: uid(),
-            role: "assistant",
-            text: r.displayText || r.finalAnswer,
-            steps: r.steps,
-            finalAnswer: r.finalAnswer,
-            lessons: r.lessons,
-          },
-        ]);
+        updateActive((s) => ({
+          ...s,
+          messages: [
+            ...s.messages,
+            {
+              role: "assistant",
+              allowed: !!data.allowed,
+              subject: data.subject || "other",
+              mode: modeToUse,
+              finalAnswer: data.finalAnswer || "",
+              steps: Array.isArray(data.steps) ? data.steps : [],
+              fullSolution: data.fullSolution || "",
+              refusal: data.refusal || "",
+              relevantLessons: Array.isArray(data.relevantLessons) ? data.relevantLessons : [],
+            },
+          ],
+        }));
       }
     } catch (e: any) {
-      updateActiveChatMessages((prev) => [...prev, { id: uid(), role: "assistant", text: e?.message || "Something went wrong." }]);
+      updateActive((s) => ({
+        ...s,
+        messages: [
+          ...s.messages,
+          {
+            role: "assistant",
+            allowed: false,
+            subject: "other",
+            mode: modeToUse,
+            finalAnswer: "",
+            steps: [],
+            fullSolution: "",
+            refusal: e?.message || "Request failed.",
+            relevantLessons: [],
+          },
+        ],
+      }));
     } finally {
       setBusy(false);
-      requestAnimationFrame(() => {
-        const el = scrollerRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
-      });
+      setImageDataUrl(null);
     }
   }
 
-  function revealNext(msgId: string) {
-    updateActiveChatMessages((prev) =>
-      prev.map((m) => {
-        if (m.role !== "assistant") return m;
-        if (m.id !== msgId) return m;
-        const total = m.steps?.length || 0;
-        const current = m.stepRevealCount || 0;
-        const next = Math.min(total, current + 1);
-        return { ...m, stepRevealCount: next };
-      })
-    );
-  }
-
-  function showAnswerNow(msgId: string) {
-    updateActiveChatMessages((prev) =>
-      prev.map((m) => {
-        if (m.role !== "assistant") return m;
-        if (m.id !== msgId) return m;
-        const total = m.steps?.length || 0;
-        return { ...m, stepRevealCount: total };
-      })
-    );
-  }
-
-  function onComposerKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+  function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (!busy) send();
+      void send();
     }
   }
 
-  function onSelectMode(m: Mode) {
-    // Once the user has asked the first question in this chat, keep the mode fixed
-    // to prevent old messages from reformatting.
-    if (chatLocked) return;
-
-    // Allow setting the mode for this (empty) chat AND as the default for new chats.
-    setChats((prev) =>
-      prev.map((c) => {
-        if (c.id !== activeChat.id) return c;
-        return { ...c, mode: m };
-      })
-    );
-    setNewChatMode(m);
+  function onUploadPhoto(file: File | null) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setImageDataUrl(String(reader.result || ""));
+    reader.readAsDataURL(file);
   }
 
+  const modeLocked = !!active?.lockedMode;
+  const modeTooltip = modeLocked ? "Start a new chat to change the mode." : "";
+
   return (
-    <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm flex flex-col h-[calc(100vh-220px)] overflow-hidden">
-      {/* Header */}
-      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+    <div className="w-full">
+      <div className="mb-4 flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-xl font-bold text-slate-900">AI Tutor</h1>
-          <p className="mt-1 text-sm text-slate-600">
-            Math & science homework help (type a question or upload a photo). If you ask something outside math/science, it will be rejected.
+          <h2 className="text-2xl font-semibold">AI Tutor</h2>
+          <p className="text-sm text-slate-600">
+            Math &amp; science homework help (type a question or upload a photo). If you ask
+            something outside math/science, it will be rejected.
           </p>
-          {chatLocked ? (
-            <div className="mt-2 text-xs text-slate-500">
-              Mode is locked for this chat: <span className="font-semibold text-slate-700">{modeLabel(activeChat.mode)}</span>. Start a new chat to change the mode.
-            </div>
+
+          {active?.lockedMode ? (
+            <p className="mt-2 text-xs text-slate-500">
+              Mode is locked for this chat:{" "}
+              <span className="font-semibold text-slate-700">{modeLabel(active.lockedMode)}</span>.
+              {" "}Start a new chat to change the mode.
+            </p>
           ) : (
-            <div className="mt-2 text-xs text-slate-500">Choose a mode for this chat before you send your first message.</div>
+            <p className="mt-2 text-xs text-slate-500">
+              Choose a mode for this chat before you send your first message.
+            </p>
           )}
         </div>
 
-        <div className="flex items-center gap-2">
-          <div className="rounded-full border border-slate-200 bg-white p-1 text-sm">
-            {(["answer_only", "full_solution", "stepwise"] as Mode[]).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => onSelectMode(m)}
-                className={`rounded-full px-3 py-1.5 font-semibold ${
-                  activeChat.mode === m ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-50"
-                } ${chatLocked && m !== activeChat.mode ? "opacity-50 cursor-not-allowed hover:bg-transparent" : ""}`}
-                title={chatLocked && m !== activeChat.mode ? "Start a new chat to change the mode." : modeLabel(m)}
-              >
-                {modeLabel(m)}
-              </button>
-            ))}
+        <div className="flex shrink-0 justify-end">
+          <div className="inline-flex max-w-[560px] flex-wrap items-center gap-2 rounded-full border bg-white p-2">
+            {(["answer_only", "full_solution", "step_by_step"] as Mode[]).map((m) => {
+              const current = active?.lockedMode || selectedMode;
+              const isActive = current === m;
+              const disabled = !!active?.lockedMode && active.lockedMode !== m;
+              return (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => handleModeClick(m)}
+                  disabled={disabled}
+                  title={disabled ? modeTooltip : ""}
+                  className={[
+                    "whitespace-nowrap rounded-full px-3 py-1 text-sm font-semibold transition",
+                    isActive ? "bg-slate-900 text-white" : "bg-white text-slate-700",
+                    disabled ? "cursor-not-allowed opacity-50" : "hover:bg-slate-100",
+                  ].join(" ")}
+                >
+                  {modeLabel(m)}
+                </button>
+              );
+            })}
           </div>
         </div>
       </div>
 
-      {/* Body */}
-      <div className="mt-5 flex flex-1 overflow-hidden gap-4">
-        {/* Left sidebar: chat list */}
-        <aside className="hidden md:flex w-64 shrink-0 flex-col rounded-2xl border border-slate-200 bg-slate-50 overflow-hidden">
-          <div className="flex items-center justify-between px-3 py-3 border-b border-slate-200 bg-white">
-            <div className="text-sm font-semibold text-slate-900">Chats</div>
-            <button
-              type="button"
-              onClick={() => newChat()}
-              className="rounded-full bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800"
-              title={`New chat (${modeLabel(newChatMode)})`}
-            >
-              New
-            </button>
+      <div className="rounded-2xl border bg-white p-4 shadow-sm">
+        <div className="grid gap-4 md:grid-cols-[280px_1fr]">
+          {/* Chats list */}
+          <div className="flex min-h-[520px] flex-col rounded-xl border">
+            <div className="flex items-center justify-between border-b px-3 py-2">
+              <div className="font-semibold">Chats</div>
+              <button
+                type="button"
+                onClick={startNewChat}
+                className="rounded-full bg-slate-900 px-3 py-1 text-sm font-semibold text-white hover:bg-slate-800"
+              >
+                New
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-2">
+              {sessions.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => onPickSession(s.id)}
+                  className={[
+                    "mb-2 w-full rounded-xl border px-3 py-2 text-left transition",
+                    s.id === activeId ? "border-slate-900 bg-slate-50" : "hover:bg-slate-50",
+                  ].join(" ")}
+                >
+                  <div className="line-clamp-1 font-semibold">{s.title || "New chat"}</div>
+                  <div className="mt-1 flex items-center justify-between text-xs text-slate-500">
+                    <span>{formatTime(s.createdAt)}</span>
+                    <span className="rounded-full border px-2 py-0.5">
+                      {s.lockedMode ? modeLabel(s.lockedMode).slice(0, 1) : "—"}
+                    </span>
+                  </div>
+                </button>
+              ))}
+            </div>
+
+            <div className="border-t bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              Tip: Press <b>Enter</b> to send, <b>Shift+Enter</b> for a new line.
+            </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-2">
-            <div className="grid gap-2">
-              {chats.map((c) => {
-                const active = c.id === activeChat.id;
-                const subtitle = new Date(c.createdAt).toLocaleString();
-                return (
-                  <div
-                    key={c.id}
-                    className={`group rounded-xl border px-3 py-2 cursor-pointer ${
-                      active ? "border-slate-300 bg-white" : "border-slate-200 bg-slate-50 hover:bg-white"
-                    }`}
-                    onClick={() => setActiveChatId(c.id)}
-                    role="button"
-                    tabIndex={0}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-semibold text-slate-900">{c.title || "New chat"}</div>
-                        <div className="mt-0.5 flex items-center gap-2">
-                          <span className="truncate text-[11px] text-slate-500">{subtitle}</span>
-                          <span className="inline-flex items-center justify-center rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-700">
-                            {modeShort(c.mode)}
-                          </span>
+          {/* Chat panel */}
+          <div className="flex min-h-[520px] flex-col rounded-xl border">
+            <div
+              ref={chatScrollRef}
+              className="flex-1 overflow-y-auto p-4"
+              style={{ maxHeight: "calc(100vh - 420px)" }}
+            >
+              {active?.messages?.length ? (
+                active.messages.map((m, idx) => {
+                  if (m.role === "user") {
+                    return (
+                      <div key={idx} className="mb-3 flex justify-end">
+                        <div className="max-w-[80%] rounded-2xl border bg-white px-4 py-2 shadow-sm">
+                          {m.text}
                         </div>
                       </div>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          deleteChat(c.id);
-                        }}
-                        className="opacity-0 group-hover:opacity-100 rounded-full border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
-                        title="Delete chat"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
+                    );
+                  }
 
-          <div className="border-t border-slate-200 bg-amber-50 px-3 py-3 text-[11px] text-amber-900">
-            <span className="font-semibold">Tip:</span> Press <span className="font-semibold">Enter</span> to send,{" "}
-            <span className="font-semibold">Shift+Enter</span> for a new line.
-          </div>
-        </aside>
-
-        {/* Main chat */}
-        <main className="flex flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
-          {/* Messages scroller */}
-          <div ref={scrollerRef} className="flex-1 overflow-y-auto p-3">
-            <div className="grid gap-3">
-              {messages.map((m) => {
-                const isUser = m.role === "user";
-                return (
-                  <div key={m.id} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-                    <div className="max-w-[min(720px,92%)] rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm">
-                      <div className="whitespace-pre-wrap text-slate-900">{isUser ? (m.text || "") : m.text}</div>
-
-                      {isUser && m.imageDataUrl && (
-                        <div className="mt-2">
-                          <img src={m.imageDataUrl} alt="Uploaded question" className="max-h-56 rounded-xl border border-slate-200 bg-white" />
+                  if (!m.allowed) {
+                    return (
+                      <div key={idx} className="mb-3 flex justify-start">
+                        <div className="max-w-[80%] rounded-2xl border bg-white px-4 py-2 shadow-sm">
+                          {m.refusal || "I can only help with math & science questions."}
                         </div>
-                      )}
+                      </div>
+                    );
+                  }
 
-                      {!isUser && m.steps && m.steps.length > 0 && (
-                        <div className="mt-3">
-                          <div className="text-xs font-semibold text-slate-600">Steps</div>
-                          <ol className="mt-2 list-decimal space-y-1 pl-5 text-slate-900">
-                            {(m.stepRevealCount ? m.steps.slice(0, m.stepRevealCount) : m.steps).map((s, idx) => (
-                              <li key={idx} className="whitespace-pre-wrap">
-                                {s}
-                              </li>
-                            ))}
-                          </ol>
-
-                          {activeChat.mode === "stepwise" ? (
-                            <div className="mt-3 flex flex-wrap items-center gap-2">
-                              {(m.stepRevealCount || 0) < m.steps.length ? (
-                                <>
-                                  <button
-                                    type="button"
-                                    onClick={() => revealNext(m.id)}
-                                    className="rounded-full bg-slate-900 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-800"
-                                  >
-                                    Next step
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => showAnswerNow(m.id)}
-                                    className="rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50"
-                                  >
-                                    Show all
-                                  </button>
-                                </>
-                              ) : null}
-                            </div>
-                          ) : null}
-
-                          {activeChat.mode === "stepwise" &&
-                            (m.stepRevealCount || 0) >= m.steps.length &&
-                            m.finalAnswer && (
-                              <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
-                                <span className="font-semibold">Final answer:</span> {m.finalAnswer}
-                              </div>
-                            )}
-                        </div>
-                      )}
-
-                      {!isUser && m.lessons && m.lessons.length > 0 && (
-                        <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
-                          <div className="text-xs font-semibold text-slate-700">Relevant lessons</div>
-                          <div className="mt-2 grid gap-2">
-                            {m.lessons.map((l, idx) => (
-                              <a key={idx} href={l.url} className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm hover:bg-slate-50">
-                                <div className="font-semibold text-slate-900">{l.title}</div>
-                                {l.why ? <div className="mt-0.5 text-xs text-slate-600">{l.why}</div> : null}
-                              </a>
-                            ))}
+                  return (
+                    <div key={idx} className="mb-4 flex justify-start">
+                      <div className="max-w-[80%] rounded-2xl border bg-white px-4 py-3 shadow-sm">
+                        {m.mode === "full_solution" && m.fullSolution ? (
+                          <div className="prose prose-sm max-w-none whitespace-pre-wrap">
+                            {m.fullSolution}
                           </div>
-                        </div>
-                      )}
+                        ) : null}
+
+                        {m.mode === "step_by_step" && m.steps?.length ? (
+                          <div className="mt-1">
+                            <div className="mb-2 text-sm font-semibold">Steps</div>
+                            <ol className="list-decimal space-y-1 pl-5 text-sm text-slate-800">
+                              {m.steps.map((s, i) => (
+                                <li key={i} className="whitespace-pre-wrap">
+                                  {s}
+                                </li>
+                              ))}
+                            </ol>
+                          </div>
+                        ) : null}
+
+                        {m.finalAnswer ? (
+                          <div className="mt-3 rounded-xl border bg-emerald-50 px-4 py-2 text-sm">
+                            <span className="font-semibold">Final answer:</span>{" "}
+                            <span className="whitespace-pre-wrap">{m.finalAnswer}</span>
+                          </div>
+                        ) : null}
+
+                        {m.relevantLessons?.length ? (
+                          <div className="mt-3 rounded-xl border bg-slate-50 p-3">
+                            <div className="mb-2 text-sm font-semibold">Relevant lessons</div>
+                            <div className="space-y-2">
+                              {m.relevantLessons.map((l) => (
+                                <a
+                                  key={l.url}
+                                  href={l.url}
+                                  className="block rounded-xl border bg-white p-3 hover:bg-slate-50"
+                                >
+                                  <div className="font-semibold">{l.title}</div>
+                                  {l.description ? (
+                                    <div className="text-sm text-slate-600">{l.description}</div>
+                                  ) : null}
+                                </a>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Composer: always on-screen */}
-          <div className="shrink-0 border-t border-slate-200 bg-white p-3">
-            <div className="grid gap-2">
-              {error && <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">{error}</div>}
-
-              {imageDataUrl && (
-                <div className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-white p-3">
-                  <img src={imageDataUrl} alt="Preview ‘question photo’" className="h-20 w-20 rounded-xl border border-slate-200 object-cover" />
-                  <div className="flex-1">
-                    <div className="text-sm font-semibold text-slate-900">Photo attached</div>
-                    <div className="mt-0.5 text-xs text-slate-600">You can still add text too.</div>
-                    <button
-                      type="button"
-                      onClick={clearImage}
-                      className="mt-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 hover:bg-slate-50"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </div>
+                  );
+                })
+              ) : (
+                <div className="text-sm text-slate-500">Ask me a math or science question.</div>
               )}
+            </div>
 
+            {/* Composer */}
+            <div className="sticky bottom-0 border-t bg-white p-4">
               <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={onComposerKeyDown}
-                rows={2}
-                placeholder="Type your math question here…"
-                className="w-full resize-none rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none focus:border-slate-400"
-                disabled={busy}
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={onKeyDown}
+                placeholder="Type your math/science question here..."
+                className="h-24 w-full resize-none rounded-2xl border p-4 outline-none focus:ring-2 focus:ring-slate-200"
               />
 
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <div className="flex items-center gap-2">
-                  <input ref={fileInputRef} type="file" accept="image/*" onChange={onPickImage} className="hidden" id="ai-tutor-file" disabled={busy} />
-                  <label
-                    htmlFor="ai-tutor-file"
-                    className={`inline-flex cursor-pointer items-center justify-center rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50 ${busy ? "pointer-events-none opacity-60" : ""}`}
-                  >
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <label className="inline-flex cursor-pointer items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold hover:bg-slate-50">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => onUploadPhoto(e.target.files?.[0] || null)}
+                    />
                     Upload photo
                   </label>
-
-                  <div className="text-xs text-slate-500">Mode: {modeLabel(activeChat.mode)}</div>
+                  <div className="text-xs text-slate-500">
+                    Mode:{" "}
+                    <span className="font-semibold">
+                      {modeLabel(active?.lockedMode || selectedMode)}
+                    </span>
+                  </div>
                 </div>
 
                 <button
                   type="button"
-                  onClick={send}
-                  disabled={busy}
-                  className="inline-flex items-center justify-center rounded-full bg-slate-900 px-5 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
+                  onClick={() => void send()}
+                  disabled={busy || (!draft.trim() && !imageDataUrl)}
+                  className="rounded-full bg-slate-900 px-6 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {busy ? "Thinking…" : "Send"}
+                  {busy ? "Sending..." : "Send"}
                 </button>
               </div>
 
-              <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900">
-                <span className="font-semibold">Note:</span> For best results, upload a clear photo (good lighting, not rotated). The tutor will refuse non-math/non-science questions.
+              {imageDataUrl ? (
+                <div className="mt-3 text-xs text-slate-500">
+                  Photo attached. It will be sent with your next message.
+                </div>
+              ) : null}
+
+              <div className="mt-3 rounded-xl border bg-amber-50 px-4 py-2 text-xs text-amber-800">
+                Note: For best results, upload a clear photo (good lighting, not rotated).
               </div>
             </div>
           </div>
-        </main>
+        </div>
+      </div>
+
+      <div className="mt-3 text-xs text-slate-500">
+        Chats are stored locally in your browser (localStorage). No server storage cost unless you
+        later decide to save them in a database.
       </div>
     </div>
   );

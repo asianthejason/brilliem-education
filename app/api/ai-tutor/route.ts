@@ -1,275 +1,165 @@
-import { auth, clerkClient } from "@clerk/nextjs/server";
-import { openaiResponsesCreate, extractOutputText } from "@/lib/openaiResponses";
-import { searchLessons } from "@/lib/lessonCatalog";
+import { auth } from "@clerk/nextjs/server";
+import { LESSONS, searchLessons, type Lesson } from "@/lib/LESSONS";
+import { openaiChatCompletionJson } from "@/lib/openaiResponses";
 
-type Mode = "answer_only" | "full_solution" | "stepwise";
-type Tier = "none" | "free" | "lessons" | "lessons_ai";
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-type HistoryItem = { role: "user" | "assistant"; text: string };
+type Mode = "answer_only" | "full_solution" | "step_by_step";
 
 type Body = {
+  message?: string;
   mode?: Mode;
-  text?: string;
-  imageDataUrl?: string | null;
-  history?: HistoryItem[];
+  imageDataUrl?: string | null; // e.g. data:image/png;base64,...
 };
 
-function isMode(x: any): x is Mode {
-  return x === "answer_only" || x === "full_solution" || x === "stepwise";
+type TutorJson = {
+  allowed: boolean;
+  subject: "math" | "science" | "other";
+  final_answer?: string;
+  steps?: string[];
+  full_solution?: string;
+  reason_if_not_allowed?: string;
+  relevant_lesson_urls?: string[];
+};
+
+function clampString(s: string, max = 4000) {
+  if (s.length <= max) return s;
+  return s.slice(0, max);
 }
 
-function clampStr(s: string, maxChars: number) {
-  if (s.length <= maxChars) return s;
-  return s.slice(0, maxChars);
+function tokenize(s: string): string[] {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 80);
 }
 
-function safeJsonParse<T>(s: string): T | null {
-  try {
-    return JSON.parse(s) as T;
-  } catch {
-    return null;
+function pickLessonCandidates(query: string, k = 12): Lesson[] {
+  // Prefer the app's built-in search function if present.
+  const fromSearch = searchLessons({ query, limit: Math.max(1, Math.min(10, k)) });
+  if (fromSearch.length) return fromSearch;
+
+  // Fallback: lightweight scoring against the LESSONS array.
+  const q = new Set(tokenize(query));
+  const scored = LESSONS.map((l) => {
+    const hay = `${l.title} ${(l.tags || []).join(" ")}`.toLowerCase();
+    let score = 0;
+    for (const w of q) {
+      if (w.length < 3) continue;
+      if (hay.includes(w)) score += 1;
+    }
+    return { l, score };
+  })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, k)
+    .map((x) => x.l);
+
+  return scored;
+}
+
+const tutorSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    allowed: { type: "boolean" },
+    subject: { type: "string", enum: ["math", "science", "other"] },
+    final_answer: { type: "string" },
+    steps: { type: "array", items: { type: "string" } },
+    full_solution: { type: "string" },
+    reason_if_not_allowed: { type: "string" },
+    relevant_lesson_urls: { type: "array", items: { type: "string" } },
+  },
+  required: ["allowed", "subject"],
+} as const;
+
+function modeInstructions(mode: Mode): string {
+  switch (mode) {
+    case "answer_only":
+      return "Mode: Answer-only. Provide ONLY the final_answer (no steps, no full_solution).";
+    case "full_solution":
+      return "Mode: Full solution. Provide full_solution (clear explanation) and final_answer. Steps are optional.";
+    case "step_by_step":
+      return "Mode: Step-by-step. Provide steps as a short numbered list and final_answer. Full_solution is optional.";
   }
-}
-
-function buildUserContent(text: string, imageDataUrl?: string | null) {
-  const content: any[] = [];
-  const cleaned = text?.trim() || "";
-  if (cleaned) content.push({ type: "input_text", text: cleaned });
-  if (imageDataUrl) {
-    content.push({ type: "input_image", image_url: imageDataUrl, detail: "high" });
-  }
-  if (content.length === 0) content.push({ type: "input_text", text: "(no text provided)" });
-  return content;
 }
 
 export async function POST(req: Request) {
-  const { userId } = await auth();
-  if (!userId) return new Response("Unauthorized", { status: 401 });
+  try {
+    const { userId } = await auth();
+    if (!userId) return new Response("Unauthorized", { status: 401 });
 
-  const body = (await req.json().catch(() => null)) as Body | null;
-  const mode: Mode = isMode(body?.mode) ? body!.mode! : "stepwise";
+    const body = (await req.json().catch(() => ({}))) as Body;
+    const messageRaw = (body.message || "").trim();
+    const mode = (body.mode || "step_by_step") as Mode;
 
-  // Keep requests bounded for serverless.
-  const text = clampStr(String(body?.text || ""), 4000);
-  const imageDataUrl = body?.imageDataUrl ? String(body.imageDataUrl) : null;
-  const history = Array.isArray(body?.history)
-    ? (body!.history!
-        .filter((h) => h && (h.role === "user" || h.role === "assistant") && typeof h.text === "string")
-        .slice(-8)
-        .map((h) => ({ role: h.role, text: clampStr(h.text, 2000) })) as HistoryItem[])
-    : ([] as HistoryItem[]);
+    if (!messageRaw && !body.imageDataUrl) {
+      return Response.json({ ok: false, error: "Missing message." }, { status: 400 });
+    }
 
-  const cc: any = clerkClient as any;
-    const client: any = typeof cc === "function" ? await cc() : cc;
-    const user = await client.users.getUser(userId);
-  const tier = ((user.unsafeMetadata?.tier as Tier) || "none") as Tier;
-  if (tier !== "lessons_ai") {
-    return new Response("Forbidden", { status: 403 });
-  }
+    const message = clampString(messageRaw || "Please answer the question shown in the image.");
 
-  // 1) Guardrail: math-or-science classification + best-effort transcription.
-  type Gate = {
-    is_math: boolean;
-    problem: string;
-    topics: string[];
-    grade_level: "elementary" | "middle" | "high" | "university" | "unknown";
-    reason_if_not_math: string;
-  };
+    const candidates = pickLessonCandidates(message, 12);
 
-  const gateModel = process.env.OPENAI_AI_TUTOR_GATE_MODEL || "gpt-5-nano";
+    const system = [
+      "You are Brilliem AI Tutor.",
+      "You answer ALL math and science homework questions (including physics/chemistry/biology basics).",
+      "If the user asks something outside math/science, set allowed=false, subject='other', and provide reason_if_not_allowed (brief).",
+      modeInstructions(mode),
+      "Important:",
+      "- Be accurate and show units when relevant.",
+      "- Do not invent lesson URLs. If choosing lessons, ONLY choose from the candidate list.",
+      "Return a SINGLE JSON object that matches the provided JSON schema.",
+    ].join("\n");
 
-  const gateResp = await openaiResponsesCreate({
-    model: gateModel,
-    instructions:
-      "You are a strict classifier for a math-or-science tutoring app. " +
-      "If the user provides an image, read it and transcribe the math problem. " +
-      "Return JSON only, and ALWAYS include reason_if_not_math (empty string if is_math=true). If the request is not a math or science problem (including non-math homework, coding, writing, general chat), set is_math=false.",
-    input: [
-      {
-        role: "user",
-        content: buildUserContent(text, imageDataUrl),
-      },
-    ],
-    text: {
-      format: {
-        type: "json_schema",
-        name: "math_gate",
-        strict: true,
-        schema: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            is_math: { type: "boolean" },
-            problem: { type: "string" },
-            topics: { type: "array", items: { type: "string" } },
-            grade_level: {
-              type: "string",
-              enum: ["elementary", "middle", "high", "university", "unknown"],
-            },
-            reason_if_not_math: { type: "string" },
-          },
-          required: ["is_math", "problem", "topics", "grade_level", "reason_if_not_math"],
-        },
-      },
-    },
-  });
+    const lessonCandidatesText =
+      "Lesson candidates (choose up to 3; use exact URLs; do not invent new URLs):\n" +
+      candidates
+        .map((l, i) => `${i + 1}. ${l.title} | ${l.url} | tags: ${(l.tags || []).join(", ")}`)
+        .join("\n");
 
-  const gateText = extractOutputText(gateResp);
-  const gate = safeJsonParse<Gate>(gateText);
+    const userText = `${message}\n\n${lessonCandidatesText}`;
 
-  if (!gate || !gate.problem?.trim()) {
-    return Response.json({ ok: false, message: "I couldn't read that. Try typing the question or uploading a clearer photo." }, { status: 400 });
-  }
+    // Chat content (supports optional image).
+    const userContent: any =
+      body.imageDataUrl && typeof body.imageDataUrl === "string"
+        ? [
+            { type: "text", text: userText },
+            { type: "image_url", image_url: { url: body.imageDataUrl } },
+          ]
+        : userText;
 
-  if (!gate.is_math) {
-    return Response.json(
-      {
-        ok: false,
-        refusal: true,
-        message:
-          gate.reason_if_not_math?.trim() ||
-          "I can only help with math or science questions. Please ask a math or science problem (or upload a photo of one).",
-      },
-      { status: 200 }
-    );
-  }
-
-  // 2) Lesson recommendations (placeholder: keyword search).
-  const lessonCandidates = searchLessons({ query: gate.problem, tags: gate.topics, limit: 5 });
-
-  // 3) Solve with a stronger model + Code Interpreter enabled for accuracy.
-  type Solve = {
-    finalAnswer: string;
-    steps: string[];
-    lessonRecommendations: Array<{ title: string; url: string; why?: string; difficulty?: string }>;
-    displayText: string;
-  };
-
-  const solverModel = process.env.OPENAI_AI_TUTOR_SOLVER_MODEL || "gpt-5-mini";
-
-  const modeInstruction =
-    mode === "answer_only"
-      ? "Give ONLY the final answer (no steps)."
-      : mode === "full_solution"
-        ? "Explain clearly with step-by-step work, then give the final answer."
-        : "Provide a short, numbered list of steps suitable for revealing one-at-a-time. Do not reveal the final answer until the end of the steps.";
-
-  const lessonBlock = lessonCandidates.length
-    ? `\n\nLesson candidates (choose up to 3 that match):\n${lessonCandidates
-        .map((l) => `- ${l.title} (${l.url}) [tags: ${l.tags.join(", ")}]`)
-        .join("\n")}`
-    : "";
-
-  const solverInstructions =
-    "You are Brilliem's AI Tutor for math-or-science help.\n" +
-    "Rules:\n" +
-    "- Only answer math or science problems. If the user tries to change topic, refuse and ask for a math question.\n" +
-    "- Be accurate. Use the python tool (Code Interpreter) to verify arithmetic/algebra whenever helpful.\n" +
-    `- Output JSON that matches the schema exactly.\n\nMode: ${mode}. ${modeInstruction}` +
-    lessonBlock;
-
-  const inputMessages: any[] = [];
-
-  // Provide brief prior context if present.
-  for (const h of history) {
-    const t = h.text?.trim();
-    if (!t) continue;
-    inputMessages.push({
-      role: h.role,
-      content: [{ type: "input_text", text: t }],
-    });
-  }
-
-  // Current question (from gate transcription + optional original).
-  inputMessages.push({
-    role: "user",
-    content: [{ type: "input_text", text: `Problem: ${gate.problem}` }],
-  });
-
-  const solveResp = await openaiResponsesCreate({
-    model: solverModel,
-    tools: [
-      {
-        type: "code_interpreter",
-        container: { type: "auto", memory_limit: "1g" },
-      },
-    ],
-    instructions: solverInstructions,
-    input: inputMessages,
-    text: {
-      format: {
-        type: "json_schema",
-        name: "math_solution",
-        strict: true,
-        schema: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            finalAnswer: { type: "string" },
-            steps: { type: "array", items: { type: "string" } },
-            lessonRecommendations: {
-              type: "array",
-              items: {
-                type: "object",
-                additionalProperties: false,
-                properties: {
-                  title: { type: "string" },
-                  url: { type: "string" },
-                  why: { type: "string" },
-                  difficulty: { type: "string" },
-                },
-                required: ["title", "url", "why", "difficulty"],
-              },
-            },
-            displayText: { type: "string" },
-          },
-          required: ["finalAnswer", "steps", "lessonRecommendations", "displayText"],
-        },
-      },
-    },
-  });
-
-  const solveText = extractOutputText(solveResp);
-  let solved = safeJsonParse<Solve>(solveText);
-
-  // Some models occasionally fail strict JSON output. Retry once without structured output.
-  if (!solved || !solved.finalAnswer) {
-    const retryResp = await openaiResponsesCreate({
-      model: solverModel,
-      tools: [
-        {
-          type: "code_interpreter",
-          container: { type: "auto", memory_limit: "1g" },
-        },
-      ],
-      instructions:
-        solverInstructions +
-        "\n\nIMPORTANT: Return ONLY valid JSON (no markdown, no extra text).\n" +
-        "Shape: {\"finalAnswer\": string, \"steps\": string[], \"lessonRecommendations\": {title,url,why,difficulty}[], \"displayText\": string}.\n" +
-        "Always include why and difficulty (empty string if unknown).",
-      input: inputMessages,
+    const result = await openaiChatCompletionJson<TutorJson>({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      schemaName: "brilliem_tutor",
+      schema: tutorSchema,
+      system,
+      user: userContent,
     });
 
-    const retryText = extractOutputText(retryResp);
-    solved = safeJsonParse<Solve>(retryText);
+    const urls = Array.isArray(result.relevant_lesson_urls) ? result.relevant_lesson_urls : [];
+    const relevantLessons = urls
+      .map((u) => candidates.find((c) => c.url === u) || LESSONS.find((c) => c.url === u))
+      .filter(Boolean)
+      .slice(0, 3) as Lesson[];
+
+    const payload = {
+      ok: true,
+      allowed: !!result.allowed,
+      subject: result.subject || "other",
+      mode,
+      finalAnswer: (result.final_answer || "").trim(),
+      steps: Array.isArray(result.steps) ? result.steps.map((s) => String(s)) : [],
+      fullSolution: (result.full_solution || "").trim(),
+      refusal: (result.reason_if_not_allowed || "").trim(),
+      relevantLessons,
+    };
+
+    return Response.json(payload);
+  } catch (err: any) {
+    console.error("AI Tutor route error:", err?.message || err);
+    return Response.json({ ok: false, error: err?.message || "Internal error." }, { status: 500 });
   }
-
-  if (!solved || !solved.finalAnswer) {
-    return Response.json(
-      { ok: false, message: "I couldn’t generate a solution for that one—try rephrasing the question." },
-      { status: 500 }
-    );
-  }
-
-  const lessons = (solved.lessonRecommendations || []).slice(0, 3);
-
-  return Response.json({
-    ok: true,
-    result: {
-      finalAnswer: solved.finalAnswer,
-      steps: solved.steps || [],
-      lessons,
-      displayText: solved.displayText,
-    },
-  });
 }
