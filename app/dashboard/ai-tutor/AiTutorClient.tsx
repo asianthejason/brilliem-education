@@ -221,7 +221,7 @@ export function AiTutorClient() {
   }
 
   return (
-    <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm h-[calc(100vh-260px)] flex flex-col overflow-hidden">
+    <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm flex flex-col max-h-[calc(100vh-220px)] overflow-hidden">
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div>
           <h1 className="text-xl font-bold text-slate-900">AI Tutor</h1>
@@ -248,8 +248,8 @@ export function AiTutorClient() {
         </div>
       </div>
 
-      <div className="mt-5 flex-1 min-h-0 flex flex-col gap-3">
-        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain rounded-2xl border border-slate-200 bg-slate-50 p-3">
+      <div className="mt-5 grid gap-3">
+        <div className="mt-4 flex-1 overflow-y-auto rounded-2xl border border-slate-200 bg-slate-50 p-3 min-h-[360px]">
           <div className="grid gap-3">
             {messages.map((m) => {
               const isUser = m.role === "user";
@@ -338,7 +338,7 @@ export function AiTutorClient() {
           </div>
         </div>
 
-        <div className="shrink-0 grid gap-2">
+        <div className="grid gap-2">
           {error && (
             <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">{error}</div>
           )}
@@ -403,7 +403,7 @@ export function AiTutorClient() {
           </div>
         </div>
 
-        <div className="shrink-0 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
           <span className="font-semibold">Note:</span> For best results, upload a clear photo (good lighting, not rotated). The tutor will refuse non-math questions.
         </div>
       </div>
