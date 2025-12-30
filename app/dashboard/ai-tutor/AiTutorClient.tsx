@@ -40,6 +40,7 @@ type ChatSession = {
   id: string;
   title: string;
   createdAt: number;
+  mode: Mode; // 🔒 locked per chat
   messages: ChatMsg[];
 };
 
@@ -51,6 +52,12 @@ function modeLabel(m: Mode) {
   if (m === "answer_only") return "Answer only";
   if (m === "full_solution") return "Full solution";
   return "Step-by-step";
+}
+
+function modeShort(m: Mode) {
+  if (m === "answer_only") return "A";
+  if (m === "full_solution") return "F";
+  return "S";
 }
 
 function isProbablyEmpty(s: string) {
@@ -74,11 +81,12 @@ function defaultAssistantGreeting(): ChatMsg {
   };
 }
 
-function makeNewChat(): ChatSession {
+function makeNewChat(mode: Mode): ChatSession {
   return {
     id: uid(),
     title: "New chat",
     createdAt: Date.now(),
+    mode,
     messages: [defaultAssistantGreeting()],
   };
 }
@@ -89,16 +97,39 @@ function titleFromUserText(text: string) {
   return t.length > 36 ? t.slice(0, 36) + "…" : t;
 }
 
-const STORAGE_KEY = "brilliem_ai_tutor_chats_v1";
+const STORAGE_KEY = "brilliem_ai_tutor_chats_v2";
+
+function normalizeLoadedChats(raw: any): ChatSession[] | null {
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  // Backward-compatible: old chats might not have `mode`
+  const out: ChatSession[] = raw
+    .map((c: any) => {
+      if (!c || typeof c !== "object") return null;
+      const mode: Mode =
+        c.mode === "answer_only" || c.mode === "full_solution" || c.mode === "stepwise" ? c.mode : "stepwise";
+      const messages: ChatMsg[] = Array.isArray(c.messages) ? c.messages : [defaultAssistantGreeting()];
+      return {
+        id: typeof c.id === "string" ? c.id : uid(),
+        title: typeof c.title === "string" ? c.title : "New chat",
+        createdAt: typeof c.createdAt === "number" ? c.createdAt : Date.now(),
+        mode,
+        messages,
+      } as ChatSession;
+    })
+    .filter(Boolean) as ChatSession[];
+  return out.length ? out : null;
+}
 
 export function AiTutorClient() {
-  const [mode, setMode] = useState<Mode>("stepwise");
   const [input, setInput] = useState("");
   const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [chats, setChats] = useState<ChatSession[]>(() => [makeNewChat()]);
+  // Default mode for new chats (user can pick in header; applied when new chat is created)
+  const [newChatMode, setNewChatMode] = useState<Mode>("stepwise");
+
+  const [chats, setChats] = useState<ChatSession[]>(() => [makeNewChat("stepwise")]);
   const [activeChatId, setActiveChatId] = useState<string>(() => "");
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -110,24 +141,28 @@ export function AiTutorClient() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) {
-        const first = makeNewChat();
+        const first = makeNewChat("stepwise");
         setChats([first]);
         setActiveChatId(first.id);
+        setNewChatMode(first.mode);
         return;
       }
-      const parsed = JSON.parse(raw) as ChatSession[];
-      if (!Array.isArray(parsed) || parsed.length === 0) {
-        const first = makeNewChat();
+      const parsed = normalizeLoadedChats(JSON.parse(raw));
+      if (!parsed) {
+        const first = makeNewChat("stepwise");
         setChats([first]);
         setActiveChatId(first.id);
+        setNewChatMode(first.mode);
         return;
       }
       setChats(parsed);
       setActiveChatId(parsed[0].id);
+      setNewChatMode(parsed[0].mode);
     } catch {
-      const first = makeNewChat();
+      const first = makeNewChat("stepwise");
       setChats([first]);
       setActiveChatId(first.id);
+      setNewChatMode(first.mode);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -144,13 +179,21 @@ export function AiTutorClient() {
   const activeChat = useMemo(() => chats.find((c) => c.id === activeChatId) || chats[0], [chats, activeChatId]);
   const messages = activeChat?.messages || [];
 
-  // Auto-scroll to bottom when messages grow (keeps the composer visible & chat usable)
+  // Chat is "started" once the user has sent at least 1 message.
+  const chatLocked = useMemo(() => messages.some((m) => m.role === "user"), [messages]);
+
+  // Keep new-chat mode aligned to active chat when switching chats (so "New" creates same mode by default)
+  useEffect(() => {
+    if (activeChat?.mode) setNewChatMode(activeChat.mode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeChatId]);
+
+  // Auto-scroll to bottom when messages grow
   useEffect(() => {
     const count = messages.length;
     const prev = prevMsgCountRef.current;
     prevMsgCountRef.current = count;
 
-    // Only jump if new messages appended
     if (count > prev) {
       const el = scrollerRef.current;
       if (el) el.scrollTop = el.scrollHeight;
@@ -186,15 +229,15 @@ export function AiTutorClient() {
     );
   }
 
-  function newChat() {
-    const c = makeNewChat();
+  function newChat(mode?: Mode) {
+    const m = mode || newChatMode;
+    const c = makeNewChat(m);
     setChats((prev) => [c, ...prev]);
     setActiveChatId(c.id);
     setInput("");
     setError(null);
     setImageDataUrl(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
-    // allow next render to apply, then scroll
     setTimeout(() => {
       const el = scrollerRef.current;
       if (el) el.scrollTop = el.scrollHeight;
@@ -205,11 +248,15 @@ export function AiTutorClient() {
     setChats((prev) => {
       const next = prev.filter((c) => c.id !== chatId);
       if (next.length === 0) {
-        const c = makeNewChat();
+        const c = makeNewChat("stepwise");
         setActiveChatId(c.id);
+        setNewChatMode(c.mode);
         return [c];
       }
-      if (activeChatId === chatId) setActiveChatId(next[0].id);
+      if (activeChatId === chatId) {
+        setActiveChatId(next[0].id);
+        setNewChatMode(next[0].mode);
+      }
       return next;
     });
   }
@@ -251,7 +298,6 @@ export function AiTutorClient() {
     const userText = input.trim();
     const userMsg: ChatMsg = { id: uid(), role: "user", text: userText || undefined, imageDataUrl: imageDataUrl || undefined };
 
-    // add message + set chat title if this is the first prompt
     updateActiveChatMessages((prev) => [...prev, userMsg]);
     if (userText) maybeSetChatTitleFromFirstUserMessage(userText);
 
@@ -264,7 +310,7 @@ export function AiTutorClient() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          mode,
+          mode: activeChat.mode, // 🔒 per-chat mode
           text: userMsg.text || "",
           imageDataUrl: userMsg.imageDataUrl || null,
           history,
@@ -280,7 +326,7 @@ export function AiTutorClient() {
 
       const r = data.result;
 
-      if (mode === "stepwise" && r.steps && r.steps.length > 0) {
+      if (activeChat.mode === "stepwise" && r.steps && r.steps.length > 0) {
         updateActiveChatMessages((prev) => [
           ...prev,
           {
@@ -310,7 +356,6 @@ export function AiTutorClient() {
       updateActiveChatMessages((prev) => [...prev, { id: uid(), role: "assistant", text: e?.message || "Something went wrong." }]);
     } finally {
       setBusy(false);
-      // ensure scroller snaps to bottom after response
       requestAnimationFrame(() => {
         const el = scrollerRef.current;
         if (el) el.scrollTop = el.scrollHeight;
@@ -349,6 +394,23 @@ export function AiTutorClient() {
     }
   }
 
+  function onSelectMode(m: Mode) {
+    // If the current chat already has messages, changing mode should start a new chat.
+    if (chatLocked && m !== activeChat.mode) {
+      newChat(m);
+      return;
+    }
+
+    // Otherwise, allow setting the mode for this (empty) chat AND as the default for new chats.
+    setChats((prev) =>
+      prev.map((c) => {
+        if (c.id !== activeChat.id) return c;
+        return { ...c, mode: m };
+      })
+    );
+    setNewChatMode(m);
+  }
+
   return (
     <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm flex flex-col h-[calc(100vh-220px)] overflow-hidden">
       {/* Header */}
@@ -358,6 +420,13 @@ export function AiTutorClient() {
           <p className="mt-1 text-sm text-slate-600">
             Math-only homework help (type a question or upload a photo). If you ask a non-math question, it will be rejected.
           </p>
+          {chatLocked ? (
+            <div className="mt-2 text-xs text-slate-500">
+              Mode is locked for this chat: <span className="font-semibold text-slate-700">{modeLabel(activeChat.mode)}</span>. Select a different mode to start a new chat.
+            </div>
+          ) : (
+            <div className="mt-2 text-xs text-slate-500">Choose a mode for this chat before you send your first message.</div>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
@@ -366,8 +435,11 @@ export function AiTutorClient() {
               <button
                 key={m}
                 type="button"
-                onClick={() => setMode(m)}
-                className={`rounded-full px-3 py-1.5 font-semibold ${mode === m ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-50"}`}
+                onClick={() => onSelectMode(m)}
+                className={`rounded-full px-3 py-1.5 font-semibold ${
+                  activeChat.mode === m ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-50"
+                }`}
+                title={chatLocked && m !== activeChat.mode ? `Start a new chat in ${modeLabel(m)} mode` : modeLabel(m)}
               >
                 {modeLabel(m)}
               </button>
@@ -384,8 +456,9 @@ export function AiTutorClient() {
             <div className="text-sm font-semibold text-slate-900">Chats</div>
             <button
               type="button"
-              onClick={newChat}
+              onClick={() => newChat()}
               className="rounded-full bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800"
+              title={`New chat (${modeLabel(newChatMode)})`}
             >
               New
             </button>
@@ -399,7 +472,9 @@ export function AiTutorClient() {
                 return (
                   <div
                     key={c.id}
-                    className={`group rounded-xl border px-3 py-2 cursor-pointer ${active ? "border-slate-300 bg-white" : "border-slate-200 bg-slate-50 hover:bg-white"}`}
+                    className={`group rounded-xl border px-3 py-2 cursor-pointer ${
+                      active ? "border-slate-300 bg-white" : "border-slate-200 bg-slate-50 hover:bg-white"
+                    }`}
                     onClick={() => setActiveChatId(c.id)}
                     role="button"
                     tabIndex={0}
@@ -407,7 +482,12 @@ export function AiTutorClient() {
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
                         <div className="truncate text-sm font-semibold text-slate-900">{c.title || "New chat"}</div>
-                        <div className="truncate text-[11px] text-slate-500">{subtitle}</div>
+                        <div className="mt-0.5 flex items-center gap-2">
+                          <span className="truncate text-[11px] text-slate-500">{subtitle}</span>
+                          <span className="inline-flex items-center justify-center rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-700">
+                            {modeShort(c.mode)}
+                          </span>
+                        </div>
                       </div>
                       <button
                         type="button"
@@ -428,7 +508,8 @@ export function AiTutorClient() {
           </div>
 
           <div className="border-t border-slate-200 bg-amber-50 px-3 py-3 text-[11px] text-amber-900">
-            <span className="font-semibold">Tip:</span> Press <span className="font-semibold">Enter</span> to send, <span className="font-semibold">Shift+Enter</span> for a new line.
+            <span className="font-semibold">Tip:</span> Press <span className="font-semibold">Enter</span> to send,{" "}
+            <span className="font-semibold">Shift+Enter</span> for a new line.
           </div>
         </aside>
 
@@ -461,7 +542,7 @@ export function AiTutorClient() {
                             ))}
                           </ol>
 
-                          {mode === "stepwise" && (
+                          {activeChat.mode === "stepwise" ? (
                             <div className="mt-3 flex flex-wrap items-center gap-2">
                               {(m.stepRevealCount || 0) < m.steps.length ? (
                                 <>
@@ -482,13 +563,15 @@ export function AiTutorClient() {
                                 </>
                               ) : null}
                             </div>
-                          )}
+                          ) : null}
 
-                          {mode === "stepwise" && (m.stepRevealCount || 0) >= m.steps.length && m.finalAnswer && (
-                            <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
-                              <span className="font-semibold">Final answer:</span> {m.finalAnswer}
-                            </div>
-                          )}
+                          {activeChat.mode === "stepwise" &&
+                            (m.stepRevealCount || 0) >= m.steps.length &&
+                            m.finalAnswer && (
+                              <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+                                <span className="font-semibold">Final answer:</span> {m.finalAnswer}
+                              </div>
+                            )}
                         </div>
                       )}
 
@@ -497,11 +580,7 @@ export function AiTutorClient() {
                           <div className="text-xs font-semibold text-slate-700">Relevant lessons</div>
                           <div className="mt-2 grid gap-2">
                             {m.lessons.map((l, idx) => (
-                              <a
-                                key={idx}
-                                href={l.url}
-                                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm hover:bg-slate-50"
-                              >
+                              <a key={idx} href={l.url} className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm hover:bg-slate-50">
                                 <div className="font-semibold text-slate-900">{l.title}</div>
                                 {l.why ? <div className="mt-0.5 text-xs text-slate-600">{l.why}</div> : null}
                               </a>
@@ -558,7 +637,7 @@ export function AiTutorClient() {
                     Upload photo
                   </label>
 
-                  <div className="text-xs text-slate-500">Mode: {modeLabel(mode)}</div>
+                  <div className="text-xs text-slate-500">Mode: {modeLabel(activeChat.mode)}</div>
                 </div>
 
                 <button
