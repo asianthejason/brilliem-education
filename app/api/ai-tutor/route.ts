@@ -127,7 +127,7 @@ export async function POST(req: Request) {
     // ---- Lesson candidates (local search) ----
     // Use the first line as a query seed, and also pass a few tags if we can infer them later.
     const seedQuery = userText || "homework question";
-    const lessonCandidates = searchLessons(seedQuery, [], 12);
+    const lessonCandidates = searchLessons({ query: seedQuery, tags: [], limit: 10 });
 
     const candidatesText =
       "Lesson candidates (choose the best matches; do not invent new URLs):\n" +
@@ -166,7 +166,7 @@ export async function POST(req: Request) {
         steps: { type: "array", items: { type: "string" } },
         full_solution: { type: "string" },
         // MUST be indices into lessonCandidates (1-based), and can be empty.
-        relevant_lesson_indices: { type: "array", items: { type: "integer", minimum: 1, maximum: 12 } },
+        relevant_lesson_indices: { type: "array", items: { type: "integer", minimum: 1, maximum: 10 } },
       },
       required: ["allowed", "subject", "refusal_message", "final_answer", "steps", "full_solution", "relevant_lesson_indices"],
     };

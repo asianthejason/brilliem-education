@@ -434,13 +434,13 @@ export function AiTutorClient() {
         </div>
 
         <div className="flex items-center gap-2">
-          <div className="inline-flex flex-wrap items-center justify-end gap-1 rounded-full border border-slate-200 bg-white p-1 text-xs sm:text-sm max-w-full">
+          <div className="inline-flex flex-nowrap items-center justify-end gap-1 rounded-full border border-slate-200 bg-white p-1 text-xs sm:text-sm max-w-full overflow-x-auto">
             {(["answer_only", "full_solution", "stepwise"] as Mode[]).map((m) => (
               <button
                 key={m}
                 type="button"
                 onClick={() => onSelectMode(m)}
-                className={`rounded-full px-3 py-1.5 font-semibold ${
+                className={`rounded-full px-3 py-1.5 font-semibold whitespace-nowrap ${
                   activeChat.mode === m ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-50"
                 } ${chatLocked && m !== activeChat.mode ? "opacity-50 cursor-not-allowed hover:bg-transparent" : ""}`}
                 title={chatLocked && m !== activeChat.mode ? "Start a new chat to change the mode." : modeLabel(m)}
