@@ -51,7 +51,8 @@ function buildUserContent(text: string, imageDataUrl?: string | null) {
   const cleaned = text?.trim() || "";
   if (cleaned) content.push({ type: "input_text", text: cleaned });
   if (imageDataUrl) {
-    content.push({ type: "input_image", image_url: imageDataUrl, detail: "high" });
+    // Responses API image input accepts image_url (data URL is fine). Avoid extra fields for compatibility.
+    content.push({ type: "input_image", image_url: imageDataUrl });
   }
   if (content.length === 0) content.push({ type: "input_text", text: "(no text provided)" });
   return content;
@@ -88,7 +89,8 @@ export async function POST(req: Request) {
     problem: string;
     topics: string[];
     grade_level: "elementary" | "middle" | "high" | "university" | "unknown";
-    reason_if_not_math?: string;
+    // Always present (empty string when is_math=true) to satisfy strict JSON schema requirements.
+    reason_if_not_math: string;
   };
 
   const gateModel = process.env.OPENAI_AI_TUTOR_GATE_MODEL || "gpt-4o-mini";
@@ -98,7 +100,8 @@ export async function POST(req: Request) {
     instructions:
       "You are a strict classifier for a math-only tutoring app. " +
       "If the user provides an image, read it and transcribe the math problem. " +
-      "Return JSON only. If the request is not a math problem (including non-math homework, coding, writing, general chat), set is_math=false.",
+      "Return JSON only. If the request is not a math problem (including non-math homework, coding, writing, general chat), set is_math=false. " +
+      "Always include reason_if_not_math as a string (empty string if is_math=true).",
     input: [
       {
         role: "user",
@@ -123,7 +126,8 @@ export async function POST(req: Request) {
             },
             reason_if_not_math: { type: "string" },
           },
-          required: ["is_math", "problem", "topics", "grade_level"],
+          // With strict JSON schema, `required` must include *every* key in `properties`.
+          required: ["is_math", "problem", "topics", "grade_level", "reason_if_not_math"],
         },
       },
     },
@@ -156,7 +160,8 @@ export async function POST(req: Request) {
   type Solve = {
     finalAnswer: string;
     steps: string[];
-    lessonRecommendations: Array<{ title: string; url: string; why?: string; difficulty?: string }>;
+    // In strict JSON schema mode, these must always be present.
+    lessonRecommendations: Array<{ title: string; url: string; why: string; difficulty: string }>;
     displayText: string;
   };
 
@@ -180,7 +185,9 @@ export async function POST(req: Request) {
     "Rules:\n" +
     "- Only answer math problems. If the user tries to change topic, refuse and ask for a math question.\n" +
     "- Be accurate. Use the python tool (Code Interpreter) to verify arithmetic/algebra whenever helpful.\n" +
-    `- Output JSON that matches the schema exactly.\n\nMode: ${mode}. ${modeInstruction}` +
+    "- Output JSON that matches the schema exactly.\n" +
+    "- Always include lessonRecommendations items with title, url, why, difficulty (use empty strings if unknown).\n\n" +
+    `Mode: ${mode}. ${modeInstruction}` +
     lessonBlock;
 
   const inputMessages: any[] = [];
@@ -227,7 +234,8 @@ export async function POST(req: Request) {
                   why: { type: "string" },
                   difficulty: { type: "string" },
                 },
-                required: ["title", "url"],
+                // With strict JSON schema, `required` must include every property key.
+                required: ["title", "url", "why", "difficulty"],
               },
             },
             displayText: { type: "string" },
