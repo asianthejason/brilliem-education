@@ -236,7 +236,7 @@ export async function POST(req: Request) {
     if (mode === "stepwise" && steps.length) result.steps = steps;
     if (mode === "full_solution") {
       // Prefer full_solution; fall back to steps joined
-      result.fullSolution = fullSolution || (steps.length ? steps.map((s, i) => `${i + 1}. ${s}`).join("\n") : "");
+      result.fullSolution = fullSolution || (steps.length ? steps.map((s: string, i: number) => `${i + 1}. ${s}`).join("\n") : "");
       if (!result.fullSolution) result.fullSolution = finalAnswer;
     }
 
