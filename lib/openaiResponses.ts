@@ -1,5 +1,17 @@
 export type ResponsesCreatePayload = Record<string, any>;
 
+export class OpenAIHttpError extends Error {
+  status: number;
+  payload: any;
+
+  constructor(status: number, message: string, payload: any) {
+    super(message);
+    this.name = "OpenAIHttpError";
+    this.status = status;
+    this.payload = payload;
+  }
+}
+
 export async function openaiResponsesCreate(payload: ResponsesCreatePayload) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
@@ -19,11 +31,23 @@ export async function openaiResponsesCreate(payload: ResponsesCreatePayload) {
     }),
   });
 
-  const json = await res.json().catch(() => null);
+  const raw = await res.text();
+  let json: any = null;
+  try {
+    json = raw ? JSON.parse(raw) : null;
+  } catch {
+    json = null;
+  }
+
   if (!res.ok) {
     const msg = (json && (json.error?.message || json.message)) || `OpenAI API error (${res.status})`;
-    throw new Error(msg);
+    throw new OpenAIHttpError(res.status, msg, json ?? raw);
   }
+
+  if (json == null) {
+    throw new OpenAIHttpError(res.status, "OpenAI API returned a non-JSON response", raw);
+  }
+
   return json as any;
 }
 
