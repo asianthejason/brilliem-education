@@ -1,165 +1,249 @@
-import { auth } from "@clerk/nextjs/server";
-import { LESSONS, searchLessons, type Lesson } from "@/lib/LESSONS";
-import { openaiChatCompletionJson } from "@/lib/openaiResponses";
+import { auth, clerkClient } from "@clerk/nextjs/server";
+import { searchLessons, type Lesson } from "@/lib/lessonCatalog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type Mode = "answer_only" | "full_solution" | "step_by_step";
+type Mode = "answer_only" | "full_solution" | "stepwise";
 
 type Body = {
   message?: string;
   mode?: Mode;
+  history?: Array<{ role: "user" | "assistant"; content: string }>;
   imageDataUrl?: string | null; // e.g. data:image/png;base64,...
 };
 
-type TutorJson = {
-  allowed: boolean;
-  subject: "math" | "science" | "other";
-  final_answer?: string;
-  steps?: string[];
-  full_solution?: string;
-  reason_if_not_allowed?: string;
-  relevant_lesson_urls?: string[];
+type ApiOk = {
+  ok: true;
+  result: {
+    finalAnswer: string;
+    steps?: string[];
+    fullSolution?: string;
+    lessons?: Lesson[];
+    displayText?: string;
+    subject?: "math" | "science";
+  };
 };
 
-function clampString(s: string, max = 4000) {
-  if (s.length <= max) return s;
-  return s.slice(0, max);
+type ApiErr = { ok: false; message: string; refusal?: boolean };
+
+function isMode(v: unknown): v is Mode {
+  return v === "answer_only" || v === "full_solution" || v === "stepwise";
 }
 
-function tokenize(s: string): string[] {
-  return s
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 80);
+function safeString(v: unknown, max = 8000): string {
+  if (typeof v !== "string") return "";
+  const s = v.trim();
+  return s.length > max ? s.slice(0, max) : s;
 }
 
-function pickLessonCandidates(query: string, k = 12): Lesson[] {
-  // Prefer the app's built-in search function if present.
-  const fromSearch = searchLessons({ query, limit: Math.max(1, Math.min(10, k)) });
-  if (fromSearch.length) return fromSearch;
-
-  // Fallback: lightweight scoring against the LESSONS array.
-  const q = new Set(tokenize(query));
-  const scored = LESSONS.map((l) => {
-    const hay = `${l.title} ${(l.tags || []).join(" ")}`.toLowerCase();
-    let score = 0;
-    for (const w of q) {
-      if (w.length < 3) continue;
-      if (hay.includes(w)) score += 1;
-    }
-    return { l, score };
-  })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, k)
-    .map((x) => x.l);
-
-  return scored;
+function firstLine(s: string): string {
+  const line = s.split("\n")[0]?.trim() ?? "";
+  return line.slice(0, 80) || "New chat";
 }
 
-const tutorSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    allowed: { type: "boolean" },
-    subject: { type: "string", enum: ["math", "science", "other"] },
-    final_answer: { type: "string" },
-    steps: { type: "array", items: { type: "string" } },
-    full_solution: { type: "string" },
-    reason_if_not_allowed: { type: "string" },
-    relevant_lesson_urls: { type: "array", items: { type: "string" } },
-  },
-  required: ["allowed", "subject"],
-} as const;
+async function getUserTier(userId: string): Promise<string | null> {
+  // clerkClient can be a function (newer versions) or an object (older versions)
+  const client: any = typeof clerkClient === "function" ? await clerkClient() : clerkClient;
+  const user = await client.users.getUser(userId);
+  return (user?.unsafeMetadata?.tier as string | undefined) ?? null;
+}
 
-function modeInstructions(mode: Mode): string {
-  switch (mode) {
-    case "answer_only":
-      return "Mode: Answer-only. Provide ONLY the final_answer (no steps, no full_solution).";
-    case "full_solution":
-      return "Mode: Full solution. Provide full_solution (clear explanation) and final_answer. Steps are optional.";
-    case "step_by_step":
-      return "Mode: Step-by-step. Provide steps as a short numbered list and final_answer. Full_solution is optional.";
+function jsonErr(message: string, status = 400, refusal = false): Response {
+  const body: ApiErr = { ok: false, message, refusal };
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+async function callOpenAIJson(args: {
+  model: string;
+  messages: any[];
+  schemaName: string;
+  schema: any;
+  maxTokens?: number;
+}): Promise<any> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("Missing OPENAI_API_KEY env var");
+
+  const payload = {
+    model: args.model,
+    messages: args.messages,
+    temperature: 0.2,
+    max_tokens: args.maxTokens ?? 900,
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: args.schemaName,
+        strict: true,
+        schema: args.schema,
+      },
+    },
+  };
+
+  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`OpenAI error (${resp.status}): ${text}`);
+  }
+
+  const data = await resp.json();
+  const content = data?.choices?.[0]?.message?.content;
+  if (!content || typeof content !== "string") throw new Error("OpenAI returned empty content");
+  try {
+    return JSON.parse(content);
+  } catch {
+    throw new Error("OpenAI returned non-JSON content");
   }
 }
 
 export async function POST(req: Request) {
   try {
     const { userId } = await auth();
-    if (!userId) return new Response("Unauthorized", { status: 401 });
+    if (!userId) return jsonErr("Unauthorized", 401);
+
+    const tier = await getUserTier(userId);
+    if (tier !== "lessons_ai") return jsonErr("AI Tutor is only available on the Lessons + AI Tutor plan.", 403);
 
     const body = (await req.json().catch(() => ({}))) as Body;
-    const messageRaw = (body.message || "").trim();
-    const mode = (body.mode || "step_by_step") as Mode;
 
-    if (!messageRaw && !body.imageDataUrl) {
-      return Response.json({ ok: false, error: "Missing message." }, { status: 400 });
+    const mode: Mode = isMode(body.mode) ? body.mode : "answer_only";
+    const userText = safeString(body.message, 12000);
+    const imageDataUrl = typeof body.imageDataUrl === "string" ? body.imageDataUrl : null;
+
+    if (!userText && !imageDataUrl) {
+      return jsonErr("Please type a question or upload a photo.", 400);
     }
 
-    const message = clampString(messageRaw || "Please answer the question shown in the image.");
+    // ---- Lesson candidates (local search) ----
+    // Use the first line as a query seed, and also pass a few tags if we can infer them later.
+    const seedQuery = userText || "homework question";
+    const lessonCandidates = searchLessons(seedQuery, [], 12);
 
-    const candidates = pickLessonCandidates(message, 12);
+    const candidatesText =
+      "Lesson candidates (choose the best matches; do not invent new URLs):\n" +
+      (lessonCandidates.length
+        ? lessonCandidates
+            .map(
+              (l, i) =>
+                `${i + 1}. ${l.title} | ${l.url} | difficulty: ${l.difficulty || "unknown"} | tags: ${(l.tags || []).join(
+                  ", "
+                )}`
+            )
+            .join("\n")
+        : "(none)");
 
-    const system = [
-      "You are Brilliem AI Tutor.",
-      "You answer ALL math and science homework questions (including physics/chemistry/biology basics).",
-      "If the user asks something outside math/science, set allowed=false, subject='other', and provide reason_if_not_allowed (brief).",
-      modeInstructions(mode),
-      "Important:",
-      "- Be accurate and show units when relevant.",
-      "- Do not invent lesson URLs. If choosing lessons, ONLY choose from the candidate list.",
-      "Return a SINGLE JSON object that matches the provided JSON schema.",
-    ].join("\n");
+    const systemPrompt =
+      `You are Brilliem AI Tutor. You ONLY help with Math or Science homework.\n` +
+      `If the user asks anything outside math/science (gaming, programming, essays, general chat), refuse.\n\n` +
+      `Return JSON that matches the provided schema exactly.\n\n` +
+      `When solving:\n` +
+      `- Be correct and concise.\n` +
+      `- If mode = answer_only, give just the final answer (and units if applicable).\n` +
+      `- If mode = full_solution, give a complete worked solution.\n` +
+      `- If mode = stepwise, give numbered steps and a final answer.\n` +
+      `- Prefer exact values; if decimal, round reasonably (2 decimal places) and show the exact fraction if easy.\n` +
+      `- If there isn't enough information, ask for the missing info.\n\n` +
+      candidatesText;
 
-    const lessonCandidatesText =
-      "Lesson candidates (choose up to 3; use exact URLs; do not invent new URLs):\n" +
-      candidates
-        .map((l, i) => `${i + 1}. ${l.title} | ${l.url} | tags: ${(l.tags || []).join(", ")}`)
-        .join("\n");
-
-    const userText = `${message}\n\n${lessonCandidatesText}`;
-
-    // Chat content (supports optional image).
-    const userContent: any =
-      body.imageDataUrl && typeof body.imageDataUrl === "string"
-        ? [
-            { type: "text", text: userText },
-            { type: "image_url", image_url: { url: body.imageDataUrl } },
-          ]
-        : userText;
-
-    const result = await openaiChatCompletionJson<TutorJson>({
-      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-      schemaName: "brilliem_tutor",
-      schema: tutorSchema,
-      system,
-      user: userContent,
-    });
-
-    const urls = Array.isArray(result.relevant_lesson_urls) ? result.relevant_lesson_urls : [];
-    const relevantLessons = urls
-      .map((u) => candidates.find((c) => c.url === u) || LESSONS.find((c) => c.url === u))
-      .filter(Boolean)
-      .slice(0, 3) as Lesson[];
-
-    const payload = {
-      ok: true,
-      allowed: !!result.allowed,
-      subject: result.subject || "other",
-      mode,
-      finalAnswer: (result.final_answer || "").trim(),
-      steps: Array.isArray(result.steps) ? result.steps.map((s) => String(s)) : [],
-      fullSolution: (result.full_solution || "").trim(),
-      refusal: (result.reason_if_not_allowed || "").trim(),
-      relevantLessons,
+    const schema = {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        allowed: { type: "boolean" },
+        subject: { type: "string", enum: ["math", "science", "other"] },
+        refusal_message: { type: "string" },
+        final_answer: { type: "string" },
+        steps: { type: "array", items: { type: "string" } },
+        full_solution: { type: "string" },
+        // MUST be indices into lessonCandidates (1-based), and can be empty.
+        relevant_lesson_indices: { type: "array", items: { type: "integer", minimum: 1, maximum: 12 } },
+      },
+      required: ["allowed", "subject", "refusal_message", "final_answer", "steps", "full_solution", "relevant_lesson_indices"],
     };
 
-    return Response.json(payload);
+    const messages: any[] = [{ role: "system", content: systemPrompt }];
+
+    // Keep a little context (last 10 turns)
+    const history = Array.isArray(body.history) ? body.history.slice(-10) : [];
+    for (const h of history) {
+      if (!h || (h.role !== "user" && h.role !== "assistant")) continue;
+      const c = safeString((h as any).content, 4000);
+      if (!c) continue;
+      messages.push({ role: h.role, content: c });
+    }
+
+    // Current user message
+    if (imageDataUrl) {
+      const parts: any[] = [];
+      if (userText) parts.push({ type: "text", text: userText });
+      parts.push({ type: "image_url", image_url: { url: imageDataUrl } });
+      messages.push({ role: "user", content: parts });
+    } else {
+      messages.push({ role: "user", content: userText });
+    }
+
+    // Prefer a vision-capable model if an image is included.
+    const model =
+      (imageDataUrl ? process.env.OPENAI_AI_TUTOR_VISION_MODEL : process.env.OPENAI_AI_TUTOR_MODEL) ||
+      (imageDataUrl ? "gpt-4o-mini" : "gpt-4.1-mini");
+
+    const out = await callOpenAIJson({
+      model,
+      messages,
+      schemaName: "brilliem_stem_tutor",
+      schema,
+      maxTokens: 1100,
+    });
+
+    const allowed = !!out?.allowed;
+    const subject = out?.subject === "science" ? "science" : out?.subject === "math" ? "math" : "other";
+
+    if (!allowed || subject === "other") {
+      const msg = safeString(out?.refusal_message) || "I can only help with math or science questions.";
+      return jsonErr(msg, 200, true); // 200 so UI shows message inline without generic error
+    }
+
+    const finalAnswer = safeString(out?.final_answer, 4000) || "I couldn't generate a solution for that one—try rephrasing the question.";
+    const steps = Array.isArray(out?.steps) ? out.steps.map((s: any) => safeString(s, 800)).filter(Boolean) : [];
+    const fullSolution = safeString(out?.full_solution, 12000);
+
+    // Map lesson indices -> lessons
+    const indices: number[] = Array.isArray(out?.relevant_lesson_indices)
+      ? out.relevant_lesson_indices.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n))
+      : [];
+    const lessons = indices
+      .map((n) => lessonCandidates[n - 1])
+      .filter(Boolean)
+      .slice(0, 4);
+
+    const result: ApiOk["result"] = {
+      finalAnswer,
+      subject,
+      lessons,
+      displayText: finalAnswer,
+    };
+
+    if (mode === "stepwise" && steps.length) result.steps = steps;
+    if (mode === "full_solution") {
+      // Prefer full_solution; fall back to steps joined
+      result.fullSolution = fullSolution || (steps.length ? steps.map((s, i) => `${i + 1}. ${s}`).join("\n") : "");
+      if (!result.fullSolution) result.fullSolution = finalAnswer;
+    }
+
+    const payload: ApiOk = { ok: true, result };
+    return new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } });
   } catch (err: any) {
-    console.error("AI Tutor route error:", err?.message || err);
-    return Response.json({ ok: false, error: err?.message || "Internal error." }, { status: 500 });
+    console.error("AI Tutor route error:", err);
+    return jsonErr("Request failed (500).", 500);
   }
 }
