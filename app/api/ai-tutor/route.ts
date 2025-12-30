@@ -82,6 +82,7 @@ async function responsesCreateWithModelFallback(
   throw new Error(`OpenAI request failed.${extra}`);
 }
 
+
 export async function POST(req: Request) {
   try {
     const { userId } = await auth();
