@@ -244,14 +244,12 @@ ${styleHint}` }],
             {
               type: "input_text",
               text:
-                "Lesson candidates (choose the best matches; do not invent new URLs):
-" +
+                "Lesson candidates (choose the best matches; do not invent new URLs):" +
                 lessonCandidates
                   .map((l, i) =>
                     `${i + 1}. ${l.title} | ${l.url} | difficulty: ${l.difficulty || "unknown"} | tags: ${(l.tags || []).join(", ")}`
                   )
-                  .join("
-"),
+                  .join(""),
             },
           ],
         },
