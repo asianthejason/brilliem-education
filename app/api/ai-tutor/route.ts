@@ -8,6 +8,7 @@ type Mode = "answer_only" | "full_solution" | "stepwise";
 
 type Body = {
   message?: string;
+  text?: string;
   mode?: Mode;
   history?: Array<{ role: "user" | "assistant"; content: string }>;
   imageDataUrl?: string | null; // e.g. data:image/png;base64,...
@@ -117,7 +118,7 @@ export async function POST(req: Request) {
     const body = (await req.json().catch(() => ({}))) as Body;
 
     const mode: Mode = isMode(body.mode) ? body.mode : "answer_only";
-    const userText = safeString(body.message, 12000);
+    const userText = safeString((body as any).message ?? (body as any).text, 12000);
     const imageDataUrl = typeof body.imageDataUrl === "string" ? body.imageDataUrl : null;
 
     if (!userText && !imageDataUrl) {
@@ -177,7 +178,7 @@ export async function POST(req: Request) {
     const history = Array.isArray(body.history) ? body.history.slice(-10) : [];
     for (const h of history) {
       if (!h || (h.role !== "user" && h.role !== "assistant")) continue;
-      const c = safeString((h as any).content, 4000);
+      const c = safeString((h as any).content ?? (h as any).text, 4000);
       if (!c) continue;
       messages.push({ role: h.role, content: c });
     }
@@ -214,12 +215,12 @@ export async function POST(req: Request) {
     }
 
     const finalAnswer = safeString(out?.final_answer, 4000) || "I couldn't generate a solution for that one—try rephrasing the question.";
-    const steps = Array.isArray(out?.steps) ? out.steps.map((s: any) => safeString(s, 800)).filter(Boolean) : [];
+    const steps = Array.isArray(out?.steps) ? out.steps.map((s: unknown) => safeString(s, 800)).filter(Boolean) : [];
     const fullSolution = safeString(out?.full_solution, 12000);
 
     // Map lesson indices -> lessons
     const indices: number[] = Array.isArray(out?.relevant_lesson_indices)
-      ? out.relevant_lesson_indices.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n))
+      ? out.relevant_lesson_indices.map((n: unknown) => Number(n)).filter((n: number) => Number.isFinite(n))
       : [];
     const lessons = indices
       .map((n) => lessonCandidates[n - 1])
