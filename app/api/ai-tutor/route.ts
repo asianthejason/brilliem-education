@@ -150,9 +150,12 @@ export async function POST(req: Request) {
       `When solving:\n` +
       `- Be correct and concise.\n` +
       `- If mode = answer_only, give just the final answer (and units if applicable).\n` +
-      `- If mode = full_solution, give a complete worked solution.\n` +
+      `- If mode = full_solution, give a complete worked solution (derivation, reasoning, and final result).\n` +
       `- If mode = stepwise, give numbered steps and a final answer.\n` +
       `- Prefer exact values; if decimal, round reasonably (2 decimal places) and show the exact fraction if easy.\n` +
+      `- Use LaTeX for math/science notation (inline \\( ... \\), display $$ ... $$).\n` +
+      `- Use \\frac{a}{b} for fractions, exponents like x^{2}, subscripts like v_{0}.\n` +
+      `- Do not put LaTeX inside code fences.\n` +
       `- If there isn't enough information, ask for the missing info.\n\n` +
       candidatesText;
 

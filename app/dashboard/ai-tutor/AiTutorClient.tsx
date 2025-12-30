@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Script from "next/script";
 
 type Mode = "answer_only" | "full_solution" | "stepwise";
 
@@ -31,6 +32,34 @@ type ApiResult = {
   lessons?: LessonRec[];
   displayText?: string;
 };
+
+declare global {
+  interface Window {
+    MathJax?: any;
+  }
+}
+
+function MathText({ text, className }: { text: string; className?: string }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const mj = window.MathJax;
+    if (!mj || !mj.typesetPromise) return;
+
+    try {
+      mj.typesetClear?.([el]);
+    } catch {}
+    mj.typesetPromise([el]).catch(() => {});
+  }, [text]);
+
+  return (
+    <div ref={ref} className={className} style={{ whiteSpace: "pre-wrap" }}>
+      {text}
+    </div>
+  );
+}
 
 type ApiResponse =
   | { ok: true; result: ApiResult }
@@ -419,7 +448,25 @@ export function AiTutorClient() {
   }
 
   return (
-    <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm flex flex-col h-[calc(100vh-220px)] overflow-hidden">
+    <>
+      <Script id="mathjax-config" strategy="beforeInteractive">
+        {`
+          window.MathJax = {
+            tex: {
+              inlineMath: [['\\(','\\)'], ['$', '$']],
+              displayMath: [['$$','$$'], ['\\[','\\]']],
+              processEscapes: true
+            },
+            options: { skipHtmlTags: ['script','noscript','style','textarea','pre','code'] }
+          };
+        `}
+      </Script>
+      <Script
+        id="mathjax-script"
+        strategy="afterInteractive"
+        src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"
+      />
+<div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm flex flex-col h-[calc(100vh-220px)] overflow-hidden">
       {/* Header */}
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div>
@@ -580,7 +627,7 @@ export function AiTutorClient() {
                             (m.stepRevealCount || 0) >= m.steps.length &&
                             m.finalAnswer && (
                               <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
-                                <span className="font-semibold">Final answer:</span> {m.finalAnswer}
+                                <span className="font-semibold">Final answer:</span> <MathText text={m.finalAnswer} />
                               </div>
                             )}
                         </div>
@@ -669,5 +716,7 @@ export function AiTutorClient() {
         </main>
       </div>
     </div>
+    </>
+
   );
 }
