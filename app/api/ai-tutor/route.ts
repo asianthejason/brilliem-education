@@ -19,6 +19,7 @@ type ApiOk = {
   result: {
     finalAnswer: string;
     steps?: string[];
+    fullSolution?: string;
     lessons?: Lesson[];
     displayText?: string;
     subject?: "math" | "science";
@@ -27,10 +28,6 @@ type ApiOk = {
 
 type ApiErr = { ok: false; message: string; refusal?: boolean };
 
-function isMode(v: unknown): v is Mode {
-  return v === "answer_only" || v === "full_solution" || v === "stepwise";
-}
-
 function safeString(v: unknown, max = 8000): string {
   if (typeof v !== "string") return "";
   const s = v.trim();
@@ -38,34 +35,57 @@ function safeString(v: unknown, max = 8000): string {
 }
 
 function normalizeForCompare(s: string): string {
-  return s.toLowerCase().replace(/\s+/g, "").replace(/[\u2018\u2019\u201C\u201D]/g, "");
+  return s
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[\u2018\u2019\u201C\u201D]/g, "")
+    .replace(/[.,。]/g, "");
+}
+
+function stripTrailingSentencePunct(s: string): string {
+  return s.trim().replace(/[\s]*[.。]$/u, "");
 }
 
 function deriveFinalAnswerFromSteps(steps: string[]): string {
-  const last = [...steps].reverse().map((s) => safeString(s, 4000)).find(Boolean) || "";
+  const last = [...steps]
+    .reverse()
+    .map((s) => safeString(s, 4000))
+    .find(Boolean);
   if (!last) return "";
+
   const cleaned = last.replace(/^\s*(?:\d+[\).:\-]\s*)/, "").trim();
 
+  // Try grabbing the RHS of the last '=' in the last step.
   const eqIdx = cleaned.lastIndexOf("=");
   if (eqIdx !== -1 && eqIdx < cleaned.length - 1) {
     const cand = cleaned.slice(eqIdx + 1).trim();
-    if (cand && /\d/.test(cand)) return cand;
+    if (cand && /\d/.test(cand)) return stripTrailingSentencePunct(cand);
   }
 
-  const colonIdx = cleaned.lastIndexOf(":");
-  if (colonIdx !== -1) {
-    const left = cleaned.slice(0, colonIdx);
-    const right = cleaned.slice(colonIdx + 1).trim();
-    if (/final/i.test(left) && right && /\d/.test(right)) return right;
-  }
-
+  // Otherwise, grab the last number-like chunk.
   const hits = cleaned.match(/[-+]?\d+(?:\.\d+)?(?:\s*[a-zA-Z°/%]+(?:\/[a-zA-Z°]+)?)?/g);
-  if (hits && hits.length) {
-    const cand = hits[hits.length - 1].trim();
-    if (cand && /\d/.test(cand)) return cand;
-  }
+  if (hits && hits.length) return stripTrailingSentencePunct(hits[hits.length - 1]);
 
   return "";
+}
+
+function reconcileFinalAnswer(finalAnswer: string, derivedFromSteps: string): string {
+  const derived = stripTrailingSentencePunct(derivedFromSteps);
+  if (!derived) return finalAnswer;
+  if (normalizeForCompare(finalAnswer) === normalizeForCompare(derived)) return finalAnswer;
+
+  // Try to replace the last numeric chunk in the sentence with the derived value.
+  const re = /[-+]?\d+(?:\.\d+)?(?:\s*[a-zA-Z°/%]+(?:\/[a-zA-Z°]+)?)?/g;
+  const matches = [...finalAnswer.matchAll(re)];
+  if (matches.length && matches[matches.length - 1].index != null) {
+    const last = matches[matches.length - 1];
+    const start = last.index as number;
+    const end = start + last[0].length;
+    return `${finalAnswer.slice(0, start)}${derived}${finalAnswer.slice(end)}`;
+  }
+
+  // Fall back to just the derived value.
+  return derived;
 }
 
 function firstLine(s: string): string {
@@ -147,7 +167,8 @@ export async function POST(req: Request) {
 
     const body = (await req.json().catch(() => ({}))) as Body;
 
-    const mode: Mode = "stepwise"; // fixed: step-by-step only (mode selection removed)
+    // Step-by-step only (mode selection removed on UI)
+    const mode: Mode = "stepwise";
     const userText = safeString((body as any).message ?? (body as any).text, 12000);
     const imageDataUrl = typeof body.imageDataUrl === "string" ? body.imageDataUrl : null;
 
@@ -174,35 +195,20 @@ export async function POST(req: Request) {
         : "(none)");
 
     const systemPrompt =
-      `You are Brilliem AI Tutor. You ONLY help with Math or Science homework.
-` +
-      `If the user asks anything outside math/science (gaming, programming, essays, general chat), refuse.
-
-` +
-      `Return JSON that matches the provided schema exactly.
-
-` +
-      `When solving:
-` +
-      `- Always respond with a clear, correct step-by-step solution.
-` +
-      `- steps MUST be an array of short strings; each item is one step.
-` +
-      `- The LAST step must compute/declare the final result.
-` +
-      `- final_answer MUST match the result in the last step (including units).
-` +
-      `- Double-check arithmetic and units before finalizing.
-` +
-      `- Prefer exact values; if decimal, round reasonably (2 decimal places) and show the exact fraction if easy.
-` +
-      `- Use LaTeX for math/science notation (inline \(...\), display $$...$$).
-` +
-      `- Do not put LaTeX inside code fences.
-` +
-      `- If there isn\'t enough information, ask for the missing info.
-
-` +
+      `You are Brilliem AI Tutor. You ONLY help with Math or Science homework.\n` +
+      `If the user asks anything outside math/science (gaming, programming, essays, general chat), refuse.\n\n` +
+      `Return JSON that matches the provided schema exactly.\n\n` +
+      `When solving:\n` +
+      `- Always provide a clear, correct step-by-step solution.\n` +
+      `- steps MUST be an array of short strings; each item is one step.\n` +
+      `- The LAST step must compute/declare the final result.\n` +
+      `- final_answer MUST match the result in the last step (including units).\n` +
+      `- Double-check arithmetic and units before finalizing.\n` +
+      `- Prefer exact values; if decimal, round reasonably (2 decimal places) and show the exact fraction if easy.\n` +
+      `- Use LaTeX for math/science notation (inline \\( ... \\), display $$ ... $$).\n` +
+      `- Use \\frac{a}{b} for fractions, exponents like x^{2}, subscripts like v_{0}.\n` +
+      `- Do not put LaTeX inside code fences.\n` +
+      `- If there isn't enough information, ask for the missing info.\n\n` +
       candidatesText;
 
     const schema = {
@@ -214,17 +220,11 @@ export async function POST(req: Request) {
         refusal_message: { type: "string" },
         final_answer: { type: "string" },
         steps: { type: "array", items: { type: "string" } },
+        full_solution: { type: "string" },
         // MUST be indices into lessonCandidates (1-based), and can be empty.
-        relevant_lesson_indices: {
-          type: "array",
-          items: {
-            type: "integer",
-            minimum: 1,
-            maximum: Math.max(1, lessonCandidates.length),
-          },
-        },
+        relevant_lesson_indices: { type: "array", items: { type: "integer", minimum: 1, maximum: 10 } },
       },
-      required: ["allowed", "subject", "refusal_message", "final_answer", "steps", "relevant_lesson_indices"],
+      required: ["allowed", "subject", "refusal_message", "final_answer", "steps", "full_solution", "relevant_lesson_indices"],
     };
 
     const messages: any[] = [{ role: "system", content: systemPrompt }];
@@ -269,8 +269,15 @@ export async function POST(req: Request) {
       return jsonErr(msg, 200, true); // 200 so UI shows message inline without generic error
     }
 
-    const finalAnswer = safeString(out?.final_answer, 4000) || "I couldn't generate a solution for that one—try rephrasing the question.";
     const steps = Array.isArray(out?.steps) ? out.steps.map((s: unknown) => safeString(s, 800)).filter(Boolean) : [];
+
+    // The model sometimes produces steps that are correct but a final_answer that drifts.
+    // Since your UI shows steps + a green "Final answer" box, we reconcile the final answer
+    // to the last step whenever they disagree.
+    const finalAnswerRaw =
+      safeString(out?.final_answer, 4000) || "I couldn't generate a solution for that one—try rephrasing the question.";
+    const derived = steps.length ? deriveFinalAnswerFromSteps(steps) : "";
+    const finalAnswer = derived ? reconcileFinalAnswer(finalAnswerRaw, derived) : finalAnswerRaw;
 
     // Map lesson indices -> lessons
     const indices: number[] = Array.isArray(out?.relevant_lesson_indices)
@@ -285,10 +292,13 @@ export async function POST(req: Request) {
       finalAnswer,
       subject,
       lessons,
-      // Don’t echo the numeric answer in the bubble header; the UI shows it after the steps.
-      displayText: "Step-by-step solution:",
-      steps: steps.length ? steps : [finalAnswer].filter(Boolean),
+      // For stepwise chats, the UI uses this for the assistant "header" text.
+      // We keep it neutral so the final answer only appears in the green box.
+      displayText: steps.length ? "Step-by-step solution:" : finalAnswer,
     };
+
+    // Step-by-step only
+    if (steps.length) result.steps = steps;
 
     const payload: ApiOk = { ok: true, result };
     return new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } });
