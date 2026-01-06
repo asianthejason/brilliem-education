@@ -19,6 +19,7 @@ type ApiOk = {
   result: {
     finalAnswer: string;
     steps?: string[];
+    fullSolution?: string;
     lessons?: Lesson[];
     displayText?: string;
     subject?: "math" | "science";
@@ -35,100 +36,6 @@ function safeString(v: unknown, max = 8000): string {
   if (typeof v !== "string") return "";
   const s = v.trim();
   return s.length > max ? s.slice(0, max) : s;
-}
-
-function normalizeForCompare(s: string): string {
-  return s.toLowerCase().replace(/\s+/g, "").replace(/[\u2018\u2019\u201C\u201D]/g, "");
-}
-
-function deriveFinalAnswerFromSteps(steps: string[]): string {
-  const last = [...steps].reverse().map((s) => safeString(s, 4000)).find(Boolean) || "";
-  if (!last) return "";
-  const cleaned0 = last.replace(/^\s*(?:\d+[\).:\-]\s*)/, "").trim();
-  const cleaned = stripMathDelimsAndTex(cleaned0);
-
-  const eqIdx = cleaned.lastIndexOf("=");
-  if (eqIdx !== -1 && eqIdx < cleaned.length - 1) {
-    const cand = cleaned.slice(eqIdx + 1).trim();
-    if (cand && /\d/.test(cand)) return cand;
-  }
-
-  const colonIdx = cleaned.lastIndexOf(":");
-  if (colonIdx !== -1) {
-    const left = cleaned.slice(0, colonIdx);
-    const right = cleaned.slice(colonIdx + 1).trim();
-    if (/final/i.test(left) && right && /\d/.test(right)) return right;
-  }
-
-  const hits = cleaned.match(/[-+]?\d+(?:\.\d+)?(?:\s*[a-zA-Z°/%]+(?:\/[a-zA-Z°]+)?)?/g);
-  if (hits && hits.length) {
-    const cand = hits[hits.length - 1].trim();
-    if (cand && /\d/.test(cand)) return cand;
-  }
-
-  return "";
-}
-
-function looksLikeMathExpr(s: string): boolean {
-  const t = (s || "").trim();
-  if (!t) return false;
-  if (/\\(frac|sqrt|times|cdot|sum|int|pi|theta|mu|Delta|alpha|beta|gamma|sin|cos|tan|log|ln|mathrm|text)\b/.test(t)) return true;
-  const hasDigit = /\d/.test(t);
-  const hasOp = /[=<>+\-*/^_]/.test(t);
-  const hasSlash = /\d\s*\/\s*\d/.test(t);
-  return hasDigit && (hasOp || hasSlash);
-}
-
-function isMostlyWords(s: string): boolean {
-  const t = (s || "").trim();
-  const letters = (t.match(/[A-Za-z]/g) || []).length;
-  const digits = (t.match(/\d/g) || []).length;
-  const ops = (t.match(/[=<>+\-*/^_]/g) || []).length;
-  const hasLatexOp = /\\(frac|sqrt|times|cdot|sum|int)\b/.test(t);
-  return letters >= 6 && ops === 0 && !hasLatexOp && digits <= 2;
-}
-
-function unwrapIfNotMath(text: string): string {
-  let out = text;
-  out = out.replace(/\\\(([\s\S]*?)\\\)/g, (m, inner) => (isMostlyWords(inner) ? inner : m));
-  out = out.replace(/\\\[(\s*[\s\S]*?\s*)\\\]/g, (m, inner) => (isMostlyWords(inner) ? inner : m));
-  return out;
-}
-
-function normalizeTutorOutput(text: string): string {
-  if (!text) return "";
-  let out = String(text);
-
-  // Convert $$...$$ to \[...\], $...$ to \( ... \) (only if it really looks like math)
-  out = out.replace(/\$\$([\s\S]*?)\$\$/g, (m, inner) => (looksLikeMathExpr(inner) ? `\\[${inner}\\]` : inner));
-  out = out.replace(/\$([^\n$]{1,300}?)\$/g, (m, inner) => (looksLikeMathExpr(inner) ? `\\(${inner}\\)` : inner));
-
-  // Avoid \text{...} in outputs; units should be outside math.
-  out = out.replace(/\\text\{([^}]*)\}/g, "$1");
-
-  // If delimiters are incorrectly wrapping mostly-english, unwrap.
-  out = unwrapIfNotMath(out);
-
-  return out.trim();
-}
-
-function stripMathDelimsAndTex(s: string): string {
-  let out = s || "";
-  out = out.replace(/\\\(|\\\)|\\\[|\\\]/g, "");
-  out = out.replace(/\\text\{([^}]*)\}/g, "$1");
-  out = out.replace(/\\mathrm\{([^}]*)\}/g, "$1");
-  out = out.replace(/\\times/g, "×");
-  out = out.replace(/\\cdot/g, "·");
-  out = out.replace(/\s+/g, " ").trim();
-  return out;
-}
-
-function dedupeTrailingUnits(s: string): string {
-  const t = s.trim();
-  // e.g. "54 km/h km/h" -> "54 km/h"
-  const m = t.match(/^(.+?)\b([a-zA-Z°/%]+(?:\/[a-zA-Z°]+)?)\s+\2\s*$/);
-  if (m) return `${m[1].trim()} ${m[2]}`.trim();
-  return t;
 }
 
 function firstLine(s: string): string {
@@ -210,7 +117,7 @@ export async function POST(req: Request) {
 
     const body = (await req.json().catch(() => ({}))) as Body;
 
-    const mode: Mode = "stepwise"; // fixed: step-by-step only (mode selection removed)
+    const mode: Mode = isMode(body.mode) ? body.mode : "answer_only";
     const userText = safeString((body as any).message ?? (body as any).text, 12000);
     const imageDataUrl = typeof body.imageDataUrl === "string" ? body.imageDataUrl : null;
 
@@ -245,30 +152,29 @@ export async function POST(req: Request) {
       `Return JSON that matches the provided schema exactly.
 
 ` +
-      `When solving:
+      `Always solve in STEP-BY-STEP mode:
 ` +
-      `- Always respond with a clear, correct step-by-step solution.
+      `- Put the reasoning/work in steps[] as short, numbered-friendly lines.
 ` +
-      `- steps MUST be an array of short strings; each item is one step.
+      `- final_answer must be concise (include units if applicable).
 ` +
-      `- The LAST step must compute/declare the final result.
-` +
-      `- final_answer MUST match the result in the last step (including units).
-` +
-      `- Double-check arithmetic and units before finalizing.
-` +
-      `- Prefer exact values; if decimal, round reasonably (2 decimal places) and show the exact fraction if easy.
-` +
-      `- Only use MathJax LaTeX for *math expressions*, wrapped with inline \\(...\\) or display \\[...\\].
-- NEVER wrap normal words/sentences in math delimiters.
-- Do NOT use $...$ or $$...$$ delimiters.
-- For division/fractions, use \frac{a}{b} inside a math delimiter so it renders with a horizontal fraction bar.
-- Put units (km/h, m/s, N, kg, s) outside math delimiters whenever possible.
-` +
-      `- Do not put LaTeX inside code fences.
-` +
-      `- If there isn\'t enough information, ask for the missing info.
+      `- full_solution MUST be an empty string.
 
+` +
+      `Formatting rules (important):
+` +
+      `- ONLY wrap actual math expressions in LaTeX delimiters: inline \(...\) and display \[...\].
+` +
+      `- Do NOT use $...$ or $$...$$.
+` +
+      `- Never wrap normal English sentences in math delimiters.
+` +
+      `- For division/fractions, use \frac{a}{b} inside math delimiters so it renders as a fraction bar.
+` +
+      `- Units should be OUTSIDE math delimiters, e.g. \(54\) km/h.
+
+` +
+      `Lesson candidates (1-based indices). Choose up to 4 relevant lessons, or [] if none:
 ` +
       candidatesText;
 
@@ -281,17 +187,11 @@ export async function POST(req: Request) {
         refusal_message: { type: "string" },
         final_answer: { type: "string" },
         steps: { type: "array", items: { type: "string" } },
+        full_solution: { type: "string" },
         // MUST be indices into lessonCandidates (1-based), and can be empty.
-        relevant_lesson_indices: {
-          type: "array",
-          items: {
-            type: "integer",
-            minimum: 1,
-            maximum: Math.max(1, lessonCandidates.length),
-          },
-        },
+        relevant_lesson_indices: { type: "array", items: { type: "integer", minimum: 1, maximum: 10 } },
       },
-      required: ["allowed", "subject", "refusal_message", "final_answer", "steps", "relevant_lesson_indices"],
+      required: ["allowed", "subject", "refusal_message", "final_answer", "steps", "full_solution", "relevant_lesson_indices"],
     };
 
     const messages: any[] = [{ role: "system", content: systemPrompt }];
@@ -336,17 +236,48 @@ export async function POST(req: Request) {
       return jsonErr(msg, 200, true); // 200 so UI shows message inline without generic error
     }
 
-    let finalAnswer = normalizeTutorOutput(safeString(out?.final_answer, 4000)) || "I couldn't generate a solution for that one—try rephrasing the question.";
-    let steps = Array.isArray(out?.steps) ? out.steps.map((s: unknown) => normalizeTutorOutput(safeString(s, 900))).filter(Boolean) : [];
+    let finalAnswer = safeString(out?.final_answer, 4000) || "I couldn't generate a solution for that one—try rephrasing the question.";
+    const steps = Array.isArray(out?.steps) ? out.steps.map((s: unknown) => safeString(s, 800)).filter(Boolean) : [];
+    const fullSolution = safeString(out?.full_solution, 12000);
 
-    // If the model's final_answer drifts from the computed result in the last step, trust the last step.
-    const derived = deriveFinalAnswerFromSteps(steps);
-    if (derived) {
-      const a = normalizeForCompare(stripMathDelimsAndTex(finalAnswer));
-      const d = normalizeForCompare(stripMathDelimsAndTex(derived));
-      if (!a || a !== d) finalAnswer = normalizeTutorOutput(derived);
+// If the model's final_answer disagrees with the computed result shown in the last step,
+// prefer the last-step result. This helps avoid "correct steps, wrong final answer".
+function stripMathDelims(s: string) {
+  return (s || "")
+    .replace(/\\\(|\\\)|\\\[|\\\]/g, "")
+    .replace(/\$\$|\$/g, "")
+    .trim();
+}
+
+function extractRhsAfterEquals(s: string): string {
+  const t = String(s || "");
+  const i = t.lastIndexOf("=");
+  if (i === -1) return "";
+  return t.slice(i + 1).trim().replace(/[.]+\s*$/g, "");
+}
+
+function canonicalizeNumberUnit(s: string): string {
+  const raw = stripMathDelims(s);
+  // Try to capture a leading number and optional unit.
+  const m = raw.match(/^(-?\d+(?:[.,]\d+)?)(?:\s*([A-Za-z%°µ/\-]+.*))?$/);
+  if (!m) return s.trim();
+  const num = m[1].replace(/,/g, "");
+  const unit = (m[2] || "").trim();
+  return `\\(${num}\\)${unit ? " " + unit : ""}`;
+}
+
+if (steps.length) {
+  const rhs = extractRhsAfterEquals(steps[steps.length - 1]);
+  if (rhs) {
+    const cand = canonicalizeNumberUnit(rhs);
+    const faStripped = stripMathDelims(finalAnswer);
+    const candStripped = stripMathDelims(cand);
+    if (candStripped && faStripped && !faStripped.includes(candStripped)) {
+      // Only override when it's clearly a different value.
+      finalAnswer = cand;
     }
-    finalAnswer = dedupeTrailingUnits(finalAnswer);
+  }
+}
 
     // Map lesson indices -> lessons
     const indices: number[] = Array.isArray(out?.relevant_lesson_indices)
@@ -359,11 +290,10 @@ export async function POST(req: Request) {
 
     const result: ApiOk["result"] = {
       finalAnswer,
-      subject,
+      steps: steps.length ? steps : undefined,
       lessons,
-      // Don’t echo the numeric answer in the bubble header; the UI shows it after the steps.
-      displayText: "Step-by-step solution:",
-      steps: steps.length ? steps : [finalAnswer].filter(Boolean),
+      subject,
+      displayText: finalAnswer,
     };
 
     const payload: ApiOk = { ok: true, result };
