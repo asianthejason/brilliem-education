@@ -3,8 +3,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Script from "next/script";
 
-type Mode = "answer_only" | "full_solution" | "stepwise";
-
 type LessonRec = {
   title: string;
   url: string;
@@ -69,32 +67,11 @@ type ChatSession = {
   id: string;
   title: string;
   createdAt: number;
-  mode: Mode; // 🔒 locked per chat
   messages: ChatMsg[];
 };
 
 function uid() {
   return Math.random().toString(16).slice(2) + Date.now().toString(16);
-}
-
-function modeLabelLong(m: Mode) {
-  if (m === "answer_only") return "Answer only";
-  if (m === "full_solution") return "Full solution";
-  return "Step-by-step";
-}
-
-function modeLabelShort(m: Mode) {
-  if (m === "answer_only") return "Answer";
-  if (m === "full_solution") return "Full";
-  return "Steps";
-}
-const modeLabel = (m: Mode) => modeLabelLong(m);
-
-
-function modeShort(m: Mode) {
-  if (m === "answer_only") return "A";
-  if (m === "full_solution") return "F";
-  return "S";
 }
 
 function isProbablyEmpty(s: string) {
@@ -114,16 +91,15 @@ function defaultAssistantGreeting(): ChatMsg {
   return {
     id: uid(),
     role: "assistant",
-    text: "Ask me a math question (type it, or upload a photo). I can do answer-only, full solutions, or step-by-step.",
+    text: "Ask me a math or science question (type it, or upload a photo). I’ll respond step-by-step.",
   };
 }
 
-function makeNewChat(mode: Mode): ChatSession {
+function makeNewChat(): ChatSession {
   return {
     id: uid(),
     title: "New chat",
     createdAt: Date.now(),
-    mode,
     messages: [defaultAssistantGreeting()],
   };
 }
@@ -138,22 +114,20 @@ const STORAGE_KEY = "brilliem_ai_tutor_chats_v2";
 
 function normalizeLoadedChats(raw: any): ChatSession[] | null {
   if (!Array.isArray(raw) || raw.length === 0) return null;
-  // Backward-compatible: old chats might not have `mode`
+
   const out: ChatSession[] = raw
     .map((c: any) => {
       if (!c || typeof c !== "object") return null;
-      const mode: Mode =
-        c.mode === "answer_only" || c.mode === "full_solution" || c.mode === "stepwise" ? c.mode : "stepwise";
       const messages: ChatMsg[] = Array.isArray(c.messages) ? c.messages : [defaultAssistantGreeting()];
       return {
         id: typeof c.id === "string" ? c.id : uid(),
         title: typeof c.title === "string" ? c.title : "New chat",
         createdAt: typeof c.createdAt === "number" ? c.createdAt : Date.now(),
-        mode,
         messages,
       } as ChatSession;
     })
     .filter(Boolean) as ChatSession[];
+
   return out.length ? out : null;
 }
 
@@ -163,10 +137,7 @@ export function AiTutorClient() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Default mode for new chats (user can pick in header; applied when new chat is created)
-  const [newChatMode, setNewChatMode] = useState<Mode>("stepwise");
-
-  const [chats, setChats] = useState<ChatSession[]>(() => [makeNewChat("stepwise")]);
+  const [chats, setChats] = useState<ChatSession[]>(() => [makeNewChat()]);
   const [activeChatId, setActiveChatId] = useState<string>(() => "");
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -178,28 +149,24 @@ export function AiTutorClient() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) {
-        const first = makeNewChat("stepwise");
+        const first = makeNewChat();
         setChats([first]);
         setActiveChatId(first.id);
-        setNewChatMode(first.mode);
         return;
       }
       const parsed = normalizeLoadedChats(JSON.parse(raw));
       if (!parsed) {
-        const first = makeNewChat("stepwise");
+        const first = makeNewChat();
         setChats([first]);
         setActiveChatId(first.id);
-        setNewChatMode(first.mode);
         return;
       }
       setChats(parsed);
       setActiveChatId(parsed[0].id);
-      setNewChatMode(parsed[0].mode);
     } catch {
-      const first = makeNewChat("stepwise");
+      const first = makeNewChat();
       setChats([first]);
       setActiveChatId(first.id);
-      setNewChatMode(first.mode);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -215,15 +182,6 @@ export function AiTutorClient() {
 
   const activeChat = useMemo(() => chats.find((c) => c.id === activeChatId) || chats[0], [chats, activeChatId]);
   const messages = activeChat?.messages || [];
-
-  // Chat is "started" once the user has sent at least 1 message.
-  const chatLocked = useMemo(() => messages.some((m) => m.role === "user"), [messages]);
-
-  // Keep new-chat mode aligned to active chat when switching chats (so "New" creates same mode by default)
-  useEffect(() => {
-    if (activeChat?.mode) setNewChatMode(activeChat.mode);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeChatId]);
 
   // Auto-scroll to bottom when messages grow
   useEffect(() => {
@@ -266,9 +224,8 @@ export function AiTutorClient() {
     );
   }
 
-  function newChat(mode?: Mode) {
-    const m = mode || newChatMode;
-    const c = makeNewChat(m);
+  function newChat() {
+    const c = makeNewChat();
     setChats((prev) => [c, ...prev]);
     setActiveChatId(c.id);
     setInput("");
@@ -285,14 +242,12 @@ export function AiTutorClient() {
     setChats((prev) => {
       const next = prev.filter((c) => c.id !== chatId);
       if (next.length === 0) {
-        const c = makeNewChat("stepwise");
+        const c = makeNewChat();
         setActiveChatId(c.id);
-        setNewChatMode(c.mode);
         return [c];
       }
       if (activeChatId === chatId) {
         setActiveChatId(next[0].id);
-        setNewChatMode(next[0].mode);
       }
       return next;
     });
@@ -328,12 +283,17 @@ export function AiTutorClient() {
     setError(null);
 
     if (!imageDataUrl && isProbablyEmpty(input)) {
-      setError("Type a math question or upload a photo.");
+      setError("Type a math/science question or upload a photo.");
       return;
     }
 
     const userText = input.trim();
-    const userMsg: ChatMsg = { id: uid(), role: "user", text: userText || undefined, imageDataUrl: imageDataUrl || undefined };
+    const userMsg: ChatMsg = {
+      id: uid(),
+      role: "user",
+      text: userText || undefined,
+      imageDataUrl: imageDataUrl || undefined,
+    };
 
     updateActiveChatMessages((prev) => [...prev, userMsg]);
     if (userText) maybeSetChatTitleFromFirstUserMessage(userText);
@@ -347,7 +307,7 @@ export function AiTutorClient() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          mode: activeChat.mode, // 🔒 per-chat mode
+          mode: "stepwise", // fixed: step-by-step only
           message: userMsg.text || "",
           text: userMsg.text || "", // backwards-compat if you ever change server keys
           imageDataUrl: userMsg.imageDataUrl || null,
@@ -364,13 +324,13 @@ export function AiTutorClient() {
 
       const r = data.result;
 
-      if (activeChat.mode === "stepwise" && r.steps && r.steps.length > 0) {
+      if (r.steps && r.steps.length > 0) {
         updateActiveChatMessages((prev) => [
           ...prev,
           {
             id: uid(),
             role: "assistant",
-            text: r.displayText || "Here’s the first step.",
+            text: "Step-by-step solution:",
             steps: r.steps,
             finalAnswer: r.finalAnswer,
             lessons: r.lessons,
@@ -384,7 +344,6 @@ export function AiTutorClient() {
             id: uid(),
             role: "assistant",
             text: r.displayText || r.finalAnswer,
-            steps: r.steps,
             finalAnswer: r.finalAnswer,
             lessons: r.lessons,
           },
@@ -432,21 +391,6 @@ export function AiTutorClient() {
     }
   }
 
-  function onSelectMode(m: Mode) {
-    // Once the user has asked the first question in this chat, keep the mode fixed
-    // to prevent old messages from reformatting.
-    if (chatLocked) return;
-
-    // Allow setting the mode for this (empty) chat AND as the default for new chats.
-    setChats((prev) =>
-      prev.map((c) => {
-        if (c.id !== activeChat.id) return c;
-        return { ...c, mode: m };
-      })
-    );
-    setNewChatMode(m);
-  }
-
   return (
     <>
       <Script id="mathjax-config" strategy="beforeInteractive">
@@ -461,146 +405,114 @@ export function AiTutorClient() {
           };
         `}
       </Script>
-      <Script
-        id="mathjax-script"
-        strategy="afterInteractive"
-        src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"
-      />
-<div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm flex flex-col h-[calc(100vh-220px)] overflow-hidden">
-      {/* Header */}
-      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-        <div>
-          <h1 className="text-xl font-bold text-slate-900">AI Tutor</h1>
-          <p className="mt-1 text-sm text-slate-600">
-            Math & science homework help (type a question or upload a photo). If you ask something outside math/science, it will be rejected.
-          </p>
-          {chatLocked ? (
-            <div className="mt-2 text-xs text-slate-500">
-              Mode is locked for this chat: <span className="font-semibold text-slate-700">{modeLabelLong(activeChat.mode)}</span>. Start a new chat to change the mode.
-            </div>
-          ) : (
-            <div className="mt-2 text-xs text-slate-500">Choose a mode for this chat before you send your first message.</div>
-          )}
+      <Script id="mathjax-script" strategy="afterInteractive" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" />
+
+      <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm flex flex-col h-[calc(100vh-220px)] overflow-hidden">
+        {/* Header */}
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+          <div>
+            <h1 className="text-xl font-bold text-slate-900">AI Tutor</h1>
+            <p className="mt-1 text-sm text-slate-600">
+              Math & science homework help (type a question or upload a photo). If you ask something outside math/science, it will be rejected.
+            </p>
+          </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <div className="w-full md:w-auto inline-flex flex-nowrap items-center gap-1 rounded-full border border-slate-200 bg-white p-1 text-xs sm:text-sm max-w-full overflow-x-auto">
-            {(["answer_only", "full_solution", "stepwise"] as Mode[]).map((m) => (
+        {/* Body */}
+        <div className="mt-5 flex flex-1 overflow-hidden gap-4">
+          {/* Left sidebar: chat list */}
+          <aside className="hidden md:flex w-64 shrink-0 flex-col rounded-2xl border border-slate-200 bg-slate-50 overflow-hidden overflow-x-hidden">
+            <div className="flex items-center justify-between px-3 py-3 border-b border-slate-200 bg-white">
+              <div className="text-sm font-semibold text-slate-900">Chats</div>
               <button
-                key={m}
                 type="button"
-                aria-disabled={chatLocked && m !== activeChat.mode}
-                onClick={() => {
-                  if (chatLocked && m !== activeChat.mode) return;
-                  onSelectMode(m);
-                }}
-                className={`shrink-0 rounded-full px-2.5 sm:px-3 py-1.5 font-semibold whitespace-nowrap ${
-                  activeChat.mode === m ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-50"
-                } ${chatLocked && m !== activeChat.mode ? "opacity-50 cursor-not-allowed hover:bg-transparent" : ""}`}
-                title={chatLocked && m !== activeChat.mode ? "Start a new chat to change the mode." : modeLabel(m)}
+                onClick={newChat}
+                className="rounded-full bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800"
+                title="New chat"
               >
-                <span className="hidden sm:inline">{modeLabelLong(m)}</span><span className="sm:hidden">{modeLabelShort(m)}</span>
+                New
               </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Body */}
-      <div className="mt-5 flex flex-1 overflow-hidden gap-4">
-        {/* Left sidebar: chat list */}
-        <aside className="hidden md:flex w-64 shrink-0 flex-col rounded-2xl border border-slate-200 bg-slate-50 overflow-hidden">
-          <div className="flex items-center justify-between px-3 py-3 border-b border-slate-200 bg-white">
-            <div className="text-sm font-semibold text-slate-900">Chats</div>
-            <button
-              type="button"
-              onClick={() => newChat()}
-              className="rounded-full bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800"
-              title={`New chat (${modeLabel(newChatMode)})`}
-            >
-              New
-            </button>
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-2">
-            <div className="grid gap-2">
-              {chats.map((c) => {
-                const active = c.id === activeChat.id;
-                const subtitle = new Date(c.createdAt).toLocaleString();
-                return (
-                  <div
-                    key={c.id}
-                    className={`group rounded-xl border px-3 py-2 cursor-pointer ${
-                      active ? "border-slate-300 bg-white" : "border-slate-200 bg-slate-50 hover:bg-white"
-                    }`}
-                    onClick={() => setActiveChatId(c.id)}
-                    role="button"
-                    tabIndex={0}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-semibold text-slate-900">{c.title || "New chat"}</div>
-                        <div className="mt-0.5 flex items-center gap-2">
-                          <span className="truncate text-[11px] text-slate-500">{subtitle}</span>
-                          <span className="inline-flex items-center justify-center rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-700">
-                            {modeShort(c.mode)}
-                          </span>
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          deleteChat(c.id);
-                        }}
-                        className="opacity-0 group-hover:opacity-100 rounded-full border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
-                        title="Delete chat"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
             </div>
-          </div>
 
-          <div className="border-t border-slate-200 bg-amber-50 px-3 py-3 text-[11px] text-amber-900">
-            <span className="font-semibold">Tip:</span> Press <span className="font-semibold">Enter</span> to send,{" "}
-            <span className="font-semibold">Shift+Enter</span> for a new line.
-          </div>
-        </aside>
-
-        {/* Main chat */}
-        <main className="flex flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
-          {/* Messages scroller */}
-          <div ref={scrollerRef} className="flex-1 overflow-y-auto p-3">
-            <div className="grid gap-3">
-              {messages.map((m) => {
-                const isUser = m.role === "user";
-                return (
-                  <div key={m.id} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-                    <div className="max-w-[min(720px,92%)] rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm">
-                      <div className="whitespace-pre-wrap text-slate-900">{isUser ? (m.text || "") : m.text}</div>
-
-                      {isUser && m.imageDataUrl && (
-                        <div className="mt-2">
-                          <img src={m.imageDataUrl} alt="Uploaded question" className="max-h-56 rounded-xl border border-slate-200 bg-white" />
+            <div className="flex-1 overflow-y-auto overflow-x-hidden p-2">
+              <div className="grid gap-2">
+                {chats.map((c) => {
+                  const active = c.id === activeChat.id;
+                  const subtitle = new Date(c.createdAt).toLocaleString();
+                  return (
+                    <div
+                      key={c.id}
+                      className={`group w-full overflow-hidden rounded-xl border px-3 py-2 cursor-pointer ${
+                        active ? "border-slate-300 bg-white" : "border-slate-200 bg-slate-50 hover:bg-white"
+                      }`}
+                      onClick={() => setActiveChatId(c.id)}
+                      role="button"
+                      tabIndex={0}
+                    >
+                      <div className="flex items-start justify-between gap-2 min-w-0">
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-semibold text-slate-900">{c.title || "New chat"}</div>
+                          <div className="mt-0.5 flex items-center gap-2 min-w-0">
+                            <span className="truncate text-[11px] text-slate-500">{subtitle}</span>
+                          </div>
                         </div>
-                      )}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteChat(c.id);
+                          }}
+                          className="shrink-0 opacity-0 group-hover:opacity-100 rounded-full border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+                          title="Delete chat"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
 
-                      {!isUser && m.steps && m.steps.length > 0 && (
-                        <div className="mt-3">
-                          <div className="text-xs font-semibold text-slate-600">Steps</div>
-                          <ol className="mt-2 list-decimal space-y-1 pl-5 text-slate-900">
-                            {(m.stepRevealCount ? m.steps.slice(0, m.stepRevealCount) : m.steps).map((s, idx) => (
-                              <li key={idx} className="whitespace-pre-wrap">
-                                {s}
-                              </li>
-                            ))}
-                          </ol>
+            <div className="border-t border-slate-200 bg-amber-50 px-3 py-3 text-[11px] text-amber-900 overflow-x-hidden">
+              <span className="font-semibold">Tip:</span> Press <span className="font-semibold">Enter</span> to send,{" "}
+              <span className="font-semibold">Shift+Enter</span> for a new line.
+            </div>
+          </aside>
 
-                          {activeChat.mode === "stepwise" ? (
+          {/* Main chat */}
+          <main className="flex flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
+            {/* Messages scroller */}
+            <div ref={scrollerRef} className="flex-1 overflow-y-auto p-3">
+              <div className="grid gap-3">
+                {messages.map((m) => {
+                  const isUser = m.role === "user";
+                  return (
+                    <div key={m.id} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+                      <div className="max-w-[min(720px,92%)] rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm">
+                        <div className="whitespace-pre-wrap text-slate-900">{isUser ? m.text || "" : m.text}</div>
+
+                        {isUser && m.imageDataUrl && (
+                          <div className="mt-2">
+                            <img
+                              src={m.imageDataUrl}
+                              alt="Uploaded question"
+                              className="max-h-56 rounded-xl border border-slate-200 bg-white"
+                            />
+                          </div>
+                        )}
+
+                        {!isUser && m.steps && m.steps.length > 0 && (
+                          <div className="mt-3">
+                            <div className="text-xs font-semibold text-slate-600">Steps</div>
+                            <ol className="mt-2 list-decimal space-y-1 pl-5 text-slate-900">
+                              {(m.stepRevealCount ? m.steps.slice(0, m.stepRevealCount) : m.steps).map((s, idx) => (
+                                <li key={idx} className="whitespace-pre-wrap">
+                                  {s}
+                                </li>
+                              ))}
+                            </ol>
+
                             <div className="mt-3 flex flex-wrap items-center gap-2">
                               {(m.stepRevealCount || 0) < m.steps.length ? (
                                 <>
@@ -621,102 +533,106 @@ export function AiTutorClient() {
                                 </>
                               ) : null}
                             </div>
-                          ) : null}
 
-                          {activeChat.mode === "stepwise" &&
-                            (m.stepRevealCount || 0) >= m.steps.length &&
-                            m.finalAnswer && (
+                            {(m.stepRevealCount || 0) >= m.steps.length && m.finalAnswer && (
                               <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
                                 <span className="font-semibold">Final answer:</span> <MathText text={m.finalAnswer} />
                               </div>
                             )}
-                        </div>
-                      )}
-
-                      {!isUser && m.lessons && m.lessons.length > 0 && (
-                        <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
-                          <div className="text-xs font-semibold text-slate-700">Relevant lessons</div>
-                          <div className="mt-2 grid gap-2">
-                            {m.lessons.map((l, idx) => (
-                              <a key={idx} href={l.url} className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm hover:bg-slate-50">
-                                <div className="font-semibold text-slate-900">{l.title}</div>
-                                {l.why ? <div className="mt-0.5 text-xs text-slate-600">{l.why}</div> : null}
-                              </a>
-                            ))}
                           </div>
-                        </div>
-                      )}
+                        )}
+
+                        {!isUser && m.lessons && m.lessons.length > 0 && (
+                          <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                            <div className="text-xs font-semibold text-slate-700">Relevant lessons</div>
+                            <div className="mt-2 grid gap-2">
+                              {m.lessons.map((l, idx) => (
+                                <a
+                                  key={idx}
+                                  href={l.url}
+                                  className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm hover:bg-slate-50"
+                                >
+                                  <div className="font-semibold text-slate-900">{l.title}</div>
+                                  {l.why ? <div className="mt-0.5 text-xs text-slate-600">{l.why}</div> : null}
+                                </a>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Composer: always on-screen */}
+            <div className="shrink-0 border-t border-slate-200 bg-white p-3">
+              <div className="grid gap-2">
+                {error && <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">{error}</div>}
+
+                {imageDataUrl && (
+                  <div className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-white p-3">
+                    <img
+                      src={imageDataUrl}
+                      alt="Preview question photo"
+                      className="h-20 w-20 rounded-xl border border-slate-200 object-cover"
+                    />
+                    <div className="flex-1">
+                      <div className="text-sm font-semibold text-slate-900">Photo attached</div>
+                      <div className="mt-0.5 text-xs text-slate-600">You can still add text too.</div>
+                      <button
+                        type="button"
+                        onClick={clearImage}
+                        className="mt-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 hover:bg-slate-50"
+                      >
+                        Remove
+                      </button>
                     </div>
                   </div>
-                );
-              })}
-            </div>
-          </div>
+                )}
 
-          {/* Composer: always on-screen */}
-          <div className="shrink-0 border-t border-slate-200 bg-white p-3">
-            <div className="grid gap-2">
-              {error && <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">{error}</div>}
-
-              {imageDataUrl && (
-                <div className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-white p-3">
-                  <img src={imageDataUrl} alt="Preview ‘question photo’" className="h-20 w-20 rounded-xl border border-slate-200 object-cover" />
-                  <div className="flex-1">
-                    <div className="text-sm font-semibold text-slate-900">Photo attached</div>
-                    <div className="mt-0.5 text-xs text-slate-600">You can still add text too.</div>
-                    <button
-                      type="button"
-                      onClick={clearImage}
-                      className="mt-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 hover:bg-slate-50"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={onComposerKeyDown}
-                rows={2}
-                placeholder="Type your math question here…"
-                className="w-full resize-none rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none focus:border-slate-400"
-                disabled={busy}
-              />
-
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <div className="flex items-center gap-2">
-                  <input ref={fileInputRef} type="file" accept="image/*" onChange={onPickImage} className="hidden" id="ai-tutor-file" disabled={busy} />
-                  <label
-                    htmlFor="ai-tutor-file"
-                    className={`inline-flex cursor-pointer items-center justify-center rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50 ${busy ? "pointer-events-none opacity-60" : ""}`}
-                  >
-                    Upload photo
-                  </label>
-
-                  <div className="text-xs text-slate-500">Mode: {modeLabelLong(activeChat.mode)}</div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={send}
+                <textarea
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={onComposerKeyDown}
+                  rows={2}
+                  placeholder="Type your math/science question here…"
+                  className="w-full resize-none rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none focus:border-slate-400"
                   disabled={busy}
-                  className="inline-flex items-center justify-center rounded-full bg-slate-900 px-5 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
-                >
-                  {busy ? "Thinking…" : "Send"}
-                </button>
-              </div>
+                />
 
-              <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900">
-                <span className="font-semibold">Note:</span> For best results, upload a clear photo (good lighting, not rotated). The tutor will refuse non-math/non-science questions.
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-center gap-2">
+                    <input ref={fileInputRef} type="file" accept="image/*" onChange={onPickImage} className="hidden" id="ai-tutor-file" disabled={busy} />
+                    <label
+                      htmlFor="ai-tutor-file"
+                      className={`inline-flex cursor-pointer items-center justify-center rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50 ${
+                        busy ? "pointer-events-none opacity-60" : ""
+                      }`}
+                    >
+                      Upload photo
+                    </label>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={send}
+                    disabled={busy}
+                    className="inline-flex items-center justify-center rounded-full bg-slate-900 px-5 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
+                  >
+                    {busy ? "Thinking…" : "Send"}
+                  </button>
+                </div>
+
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900">
+                  <span className="font-semibold">Note:</span> For best results, upload a clear photo (good lighting, not rotated). The tutor will refuse non-math/non-science questions.
+                </div>
               </div>
             </div>
-          </div>
-        </main>
+          </main>
+        </div>
       </div>
-    </div>
     </>
-
   );
 }

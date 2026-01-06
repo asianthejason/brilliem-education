@@ -19,7 +19,6 @@ type ApiOk = {
   result: {
     finalAnswer: string;
     steps?: string[];
-    fullSolution?: string;
     lessons?: Lesson[];
     displayText?: string;
     subject?: "math" | "science";
@@ -36,6 +35,37 @@ function safeString(v: unknown, max = 8000): string {
   if (typeof v !== "string") return "";
   const s = v.trim();
   return s.length > max ? s.slice(0, max) : s;
+}
+
+function normalizeForCompare(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, "").replace(/[\u2018\u2019\u201C\u201D]/g, "");
+}
+
+function deriveFinalAnswerFromSteps(steps: string[]): string {
+  const last = [...steps].reverse().map((s) => safeString(s, 4000)).find(Boolean) || "";
+  if (!last) return "";
+  const cleaned = last.replace(/^\s*(?:\d+[\).:\-]\s*)/, "").trim();
+
+  const eqIdx = cleaned.lastIndexOf("=");
+  if (eqIdx !== -1 && eqIdx < cleaned.length - 1) {
+    const cand = cleaned.slice(eqIdx + 1).trim();
+    if (cand && /\d/.test(cand)) return cand;
+  }
+
+  const colonIdx = cleaned.lastIndexOf(":");
+  if (colonIdx !== -1) {
+    const left = cleaned.slice(0, colonIdx);
+    const right = cleaned.slice(colonIdx + 1).trim();
+    if (/final/i.test(left) && right && /\d/.test(right)) return right;
+  }
+
+  const hits = cleaned.match(/[-+]?\d+(?:\.\d+)?(?:\s*[a-zA-Z°/%]+(?:\/[a-zA-Z°]+)?)?/g);
+  if (hits && hits.length) {
+    const cand = hits[hits.length - 1].trim();
+    if (cand && /\d/.test(cand)) return cand;
+  }
+
+  return "";
 }
 
 function firstLine(s: string): string {
@@ -117,7 +147,7 @@ export async function POST(req: Request) {
 
     const body = (await req.json().catch(() => ({}))) as Body;
 
-    const mode: Mode = isMode(body.mode) ? body.mode : "answer_only";
+    const mode: Mode = "stepwise"; // fixed: step-by-step only (mode selection removed)
     const userText = safeString((body as any).message ?? (body as any).text, 12000);
     const imageDataUrl = typeof body.imageDataUrl === "string" ? body.imageDataUrl : null;
 
@@ -144,19 +174,35 @@ export async function POST(req: Request) {
         : "(none)");
 
     const systemPrompt =
-      `You are Brilliem AI Tutor. You ONLY help with Math or Science homework.\n` +
-      `If the user asks anything outside math/science (gaming, programming, essays, general chat), refuse.\n\n` +
-      `Return JSON that matches the provided schema exactly.\n\n` +
-      `When solving:\n` +
-      `- Be correct and concise.\n` +
-      `- If mode = answer_only, give just the final answer (and units if applicable).\n` +
-      `- If mode = full_solution, give a complete worked solution (derivation, reasoning, and final result).\n` +
-      `- If mode = stepwise, give numbered steps and a final answer.\n` +
-      `- Prefer exact values; if decimal, round reasonably (2 decimal places) and show the exact fraction if easy.\n` +
-      `- Use LaTeX for math/science notation (inline \\( ... \\), display $$ ... $$).\n` +
-      `- Use \\frac{a}{b} for fractions, exponents like x^{2}, subscripts like v_{0}.\n` +
-      `- Do not put LaTeX inside code fences.\n` +
-      `- If there isn't enough information, ask for the missing info.\n\n` +
+      `You are Brilliem AI Tutor. You ONLY help with Math or Science homework.
+` +
+      `If the user asks anything outside math/science (gaming, programming, essays, general chat), refuse.
+
+` +
+      `Return JSON that matches the provided schema exactly.
+
+` +
+      `When solving:
+` +
+      `- Always respond with a clear, correct step-by-step solution.
+` +
+      `- steps MUST be an array of short strings; each item is one step.
+` +
+      `- The LAST step must compute/declare the final result.
+` +
+      `- final_answer MUST match the result in the last step (including units).
+` +
+      `- Double-check arithmetic and units before finalizing.
+` +
+      `- Prefer exact values; if decimal, round reasonably (2 decimal places) and show the exact fraction if easy.
+` +
+      `- Use LaTeX for math/science notation (inline \(...\), display $$...$$).
+` +
+      `- Do not put LaTeX inside code fences.
+` +
+      `- If there isn\'t enough information, ask for the missing info.
+
+` +
       candidatesText;
 
     const schema = {
@@ -168,11 +214,17 @@ export async function POST(req: Request) {
         refusal_message: { type: "string" },
         final_answer: { type: "string" },
         steps: { type: "array", items: { type: "string" } },
-        full_solution: { type: "string" },
         // MUST be indices into lessonCandidates (1-based), and can be empty.
-        relevant_lesson_indices: { type: "array", items: { type: "integer", minimum: 1, maximum: 10 } },
+        relevant_lesson_indices: {
+          type: "array",
+          items: {
+            type: "integer",
+            minimum: 1,
+            maximum: Math.max(1, lessonCandidates.length),
+          },
+        },
       },
-      required: ["allowed", "subject", "refusal_message", "final_answer", "steps", "full_solution", "relevant_lesson_indices"],
+      required: ["allowed", "subject", "refusal_message", "final_answer", "steps", "relevant_lesson_indices"],
     };
 
     const messages: any[] = [{ role: "system", content: systemPrompt }];
@@ -219,7 +271,6 @@ export async function POST(req: Request) {
 
     const finalAnswer = safeString(out?.final_answer, 4000) || "I couldn't generate a solution for that one—try rephrasing the question.";
     const steps = Array.isArray(out?.steps) ? out.steps.map((s: unknown) => safeString(s, 800)).filter(Boolean) : [];
-    const fullSolution = safeString(out?.full_solution, 12000);
 
     // Map lesson indices -> lessons
     const indices: number[] = Array.isArray(out?.relevant_lesson_indices)
@@ -234,15 +285,10 @@ export async function POST(req: Request) {
       finalAnswer,
       subject,
       lessons,
-      displayText: finalAnswer,
+      // Don’t echo the numeric answer in the bubble header; the UI shows it after the steps.
+      displayText: "Step-by-step solution:",
+      steps: steps.length ? steps : [finalAnswer].filter(Boolean),
     };
-
-    if (mode === "stepwise" && steps.length) result.steps = steps;
-    if (mode === "full_solution") {
-      // Prefer full_solution; fall back to steps joined
-      result.fullSolution = fullSolution || (steps.length ? steps.map((s: string, i: number) => `${i + 1}. ${s}`).join("\n") : "");
-      if (!result.fullSolution) result.fullSolution = finalAnswer;
-    }
 
     const payload: ApiOk = { ok: true, result };
     return new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } });
