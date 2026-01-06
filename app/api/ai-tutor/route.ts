@@ -69,6 +69,36 @@ function deriveFinalAnswerFromSteps(steps: string[]): string {
   return "";
 }
 
+
+function sanitizeTutorText(input: string): string {
+  if (!input) return input;
+  let s = input;
+
+  s = s.replace(/\\text\{([^}]*)\}/g, "$1");
+  s = s.replace(/\\mathrm\{([^}]*)\}/g, "$1");
+  s = s.replace(/\\times/g, "×");
+  s = s.replace(/\\cdot/g, "·");
+  s = s.replace(/\\left/g, "");
+  s = s.replace(/\\right/g, "");
+
+  const fracRe = /\\frac\{([^{}]+)\}\{([^{}]+)\}/g;
+  for (let i = 0; i < 5 && fracRe.test(s); i++) {
+    s = s.replace(fracRe, "($1)/($2)");
+  }
+
+  s = s.replace(/\\\\/g, "\n");
+  s = s.replace(/\\([a-zA-Z]+)/g, "$1");
+  s = s.replace(/[{}]/g, "");
+  s = s.replace(/[ \t]+/g, " ").replace(/ *\n */g, "\n");
+
+  return s.trim();
+}
+
+function sanitizeSteps(steps?: string[]): string[] | undefined {
+  if (!steps) return steps;
+  return steps.map((x) => sanitizeTutorText(x));
+}
+
 function reconcileFinalAnswer(finalAnswer: string, derivedFromSteps: string): string {
   const derived = stripTrailingSentencePunct(derivedFromSteps);
   if (!derived) return finalAnswer;
@@ -205,9 +235,8 @@ export async function POST(req: Request) {
       `- final_answer MUST match the result in the last step (including units).\n` +
       `- Double-check arithmetic and units before finalizing.\n` +
       `- Prefer exact values; if decimal, round reasonably (2 decimal places) and show the exact fraction if easy.\n` +
-      `- Use LaTeX for math/science notation (inline \\( ... \\), display $$ ... $$).\n` +
-      `- Use \\frac{a}{b} for fractions, exponents like x^{2}, subscripts like v_{0}.\n` +
-      `- Do not put LaTeX inside code fences.\n` +
+      `- Use plain text math (NO LaTeX/TeX). Do NOT output backslashes, $...$, \\( ... \\), \\frac, or \\text.\n` +
+      `- Write fractions as a/b, multiplication as × or *, exponents as x^2, subscripts as v0 or v_0.\n` +
       `- If there isn't enough information, ask for the missing info.\n\n` +
       candidatesText;
 
