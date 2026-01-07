@@ -95,9 +95,51 @@ function unwrapIfNotMath(text: string): string {
   return out;
 }
 
+function restoreJsonEscapedLatex(text: string): string {
+  // If the model outputs LaTeX backslashes unescaped inside JSON, sequences like "\frac" are interpreted as "\f" (form-feed) + "rac"
+  // and "\theta" becomes "\t" (tab) + "heta". Restore those control characters back into a visible backslash + letter.
+  return (text || "")
+    .replace(/\u000c(?=[A-Za-z])/g, "\\f")
+    .replace(/\u0009(?=[A-Za-z])/g, "\\t")
+    .replace(/\u0008(?=[A-Za-z])/g, "\\b")
+    .replace(/\u000d(?=[A-Za-z])/g, "\\r");
+}
+
+function wrapBareTeXInPlainSegments(text: string): string {
+  const mathRe = /\\\((?:[\s\S]*?)\\\)|\\\[(?:\s*[\s\S]*?\s*)\\\]/g;
+  let out = "";
+  let last = 0;
+  let m: RegExpExecArray | null;
+
+  const processPlain = (seg: string) => {
+    let s = seg;
+
+    // Fix common lost-backslash TeX commands like "frac{...}{...}" or "sqrt{...}"
+    s = s.replace(/(^|[^\\])frac\{/g, "$1\\frac{");
+    s = s.replace(/(^|[^\\])sqrt\{/g, "$1\\sqrt{");
+
+    // Wrap bare \frac{a}{b} so it renders with a horizontal bar.
+    s = s.replace(/\\frac\{[^{}]+\}\{[^{}]+\}/g, (f) => `\\(${f}\\)`);
+
+    // Wrap simple numeric fractions like 3/4 -> \(\frac{3}{4}\)
+    s = s.replace(/\b(\d{1,4})\s*\/\s*(\d{1,4})\b/g, (_m, a, b) => `\\(\\frac{${a}}{${b}}\\)`);
+
+    return s;
+  };
+
+  while ((m = mathRe.exec(text))) {
+    const start = m.index ?? 0;
+    out += processPlain(text.slice(last, start));
+    out += m[0]; // keep existing math blocks untouched
+    last = start + m[0].length;
+  }
+  out += processPlain(text.slice(last));
+  return out;
+}
+
 function normalizeTutorText(text: string): string {
   if (!text) return "";
-  let out = String(text);
+  let out = restoreJsonEscapedLatex(String(text));
 
   // Convert $/$$ delimiters into MathJax-safe delimiters (only if it looks like math).
   out = out.replace(/\$\$([\s\S]*?)\$\$/g, (m, inner) => (looksLikeMathExpr(inner) ? `\\[${inner}\\]` : inner));
@@ -108,6 +150,9 @@ function normalizeTutorText(text: string): string {
 
   // If delimiters are incorrectly wrapping mostly-english, unwrap.
   out = unwrapIfNotMath(out);
+
+  // Ensure bare fractions render nicely (and keep non-math words as plain text).
+  out = wrapBareTeXInPlainSegments(out);
 
   return out.trim();
 }
