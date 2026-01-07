@@ -42,24 +42,51 @@ function normalizeForCompare(s: string): string {
 }
 
 function deriveFinalAnswerFromSteps(steps: string[]): string {
-  const last = [...steps].reverse().map((s) => safeString(s, 4000)).find(Boolean) || "";
-  if (!last) return "";
-  const cleaned0 = last.replace(/^\s*(?:\d+[\).:\-]\s*)/, "").trim();
-  const cleaned = stripMathDelimsAndTex(cleaned0);
+  const lastRaw =
+    [...steps].reverse().map((s) => safeString(s, 4000)).find(Boolean) || "";
+  if (!lastRaw) return "";
 
-  const eqIdx = cleaned.lastIndexOf("=");
-  if (eqIdx !== -1 && eqIdx < cleaned.length - 1) {
-    const cand = cleaned.slice(eqIdx + 1).trim();
-    if (cand && /\d/.test(cand)) return cand;
+  // Remove any leading "1." / "1)" / etc.
+  const last = lastRaw.replace(/^\s*(?:\d+[\).:\-]\s*)/, "").trim();
+
+  // If there's an '=', prefer whatever is after the last '='.
+  const rhs = (() => {
+    const idx = last.lastIndexOf("=");
+    if (idx !== -1 && idx < last.length - 1) return last.slice(idx + 1).trim();
+    return last;
+  })();
+
+  // 1) Prefer the last explicit MathJax-delimited expression (and keep it delimited so it renders).
+  const mathMatches = [...rhs.matchAll(/\\\(([\s\S]*?)\\\)|\\\[(\s*[\s\S]*?\s*)\\\]/g)];
+  if (mathMatches.length) {
+    const m = mathMatches[mathMatches.length - 1]!;
+    const full = m[0];
+    const end = (m.index ?? 0) + full.length;
+
+    // Capture simple trailing units right after the math, e.g. "\(15\) m/s"
+    const tail = rhs.slice(end);
+    const unit = tail.match(/^\s*([a-zA-Z°/%]+(?:\/[a-zA-Z°]+)?)\b/);
+    return (full + (unit ? ` ${unit[1]}` : "")).trim();
   }
 
-  const colonIdx = cleaned.lastIndexOf(":");
-  if (colonIdx !== -1) {
-    const left = cleaned.slice(0, colonIdx);
-    const right = cleaned.slice(colonIdx + 1).trim();
-    if (/final/i.test(left) && right && /\d/.test(right)) return right;
+  // 2) Prefer a TeX \frac{a}{b} (wrap in \( \) so it renders nicely).
+  const fracMatches = [...rhs.matchAll(/\\frac\{[^{}]+\}\{[^{}]+\}/g)];
+  if (fracMatches.length) {
+    const frac = fracMatches[fracMatches.length - 1]![0];
+    return `\\(${frac}\\)`;
   }
 
+  // 3) Prefer a simple numeric fraction like 41/28 and convert to \frac for horizontal bar.
+  const slashFracMatches = [...rhs.matchAll(/\b(\d+)\s*\/\s*(\d+)\b/g)];
+  if (slashFracMatches.length) {
+    const m = slashFracMatches[slashFracMatches.length - 1]!;
+    const a = m[1];
+    const b = m[2];
+    return `\\(\\frac{${a}}{${b}}\\)`;
+  }
+
+  // 4) Fall back to the last number(+optional unit) in the line.
+  const cleaned = stripMathDelimsAndTex(rhs);
   const hits = cleaned.match(/[-+]?\d+(?:\.\d+)?(?:\s*[a-zA-Z°/%]+(?:\/[a-zA-Z°]+)?)?/g);
   if (hits && hits.length) {
     const cand = hits[hits.length - 1].trim();
@@ -114,11 +141,26 @@ function normalizeTutorOutput(text: string): string {
 
 function stripMathDelimsAndTex(s: string): string {
   let out = s || "";
+  // Remove MathJax delimiters
   out = out.replace(/\\\(|\\\)|\\\[|\\\]/g, "");
+
+  // Common TeX wrappers
   out = out.replace(/\\text\{([^}]*)\}/g, "$1");
   out = out.replace(/\\mathrm\{([^}]*)\}/g, "$1");
+
+  // Convert fractions to a comparable plain form
+  // e.g. \frac{41}{28} -> 41/28
+  out = out.replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, "$1/$2");
+
+  // Operators
   out = out.replace(/\\times/g, "×");
   out = out.replace(/\\cdot/g, "·");
+
+  // Remove remaining TeX backslash commands (best-effort)
+  out = out.replace(/\\[a-zA-Z]+/g, "");
+
+  // Remove leftover braces and normalize whitespace
+  out = out.replace(/[{}]/g, "");
   out = out.replace(/\s+/g, " ").trim();
   return out;
 }
@@ -210,6 +252,7 @@ export async function POST(req: Request) {
 
     const body = (await req.json().catch(() => ({}))) as Body;
 
+    const mode: Mode = "stepwise"; // fixed: step-by-step only (mode selection removed)
     const userText = safeString((body as any).message ?? (body as any).text, 12000);
     const imageDataUrl = typeof body.imageDataUrl === "string" ? body.imageDataUrl : null;
 
