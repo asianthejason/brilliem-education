@@ -117,7 +117,7 @@ export async function POST(req: Request) {
 
     const body = (await req.json().catch(() => ({}))) as Body;
 
-    const mode: Mode = isMode(body.mode) ? body.mode : "answer_only";
+    const mode: Mode = "stepwise";
     const userText = safeString((body as any).message ?? (body as any).text, 12000);
     const imageDataUrl = typeof body.imageDataUrl === "string" ? body.imageDataUrl : null;
 
@@ -144,38 +144,19 @@ export async function POST(req: Request) {
         : "(none)");
 
     const systemPrompt =
-      `You are Brilliem AI Tutor. You ONLY help with Math or Science homework.
-` +
-      `If the user asks anything outside math/science (gaming, programming, essays, general chat), refuse.
-
-` +
-      `Return JSON that matches the provided schema exactly.
-
-` +
-      `Always solve in STEP-BY-STEP mode:
-` +
-      `- Put the reasoning/work in steps[] as short, numbered-friendly lines.
-` +
-      `- final_answer must be concise (include units if applicable).
-` +
-      `- full_solution MUST be an empty string.
-
-` +
-      `Formatting rules (important):
-` +
-      `- ONLY wrap actual math expressions in LaTeX delimiters: inline \(...\) and display \[...\].
-` +
-      `- Do NOT use $...$ or $$...$$.
-` +
-      `- Never wrap normal English sentences in math delimiters.
-` +
-      `- For division/fractions, use \frac{a}{b} inside math delimiters so it renders as a fraction bar.
-` +
-      `- Units should be OUTSIDE math delimiters, e.g. \(54\) km/h.
-
-` +
-      `Lesson candidates (1-based indices). Choose up to 4 relevant lessons, or [] if none:
-` +
+      `You are Brilliem AI Tutor. You ONLY help with Math or Science homework.\n` +
+      `If the user asks anything outside math/science (gaming, programming, essays, general chat), refuse.\n\n` +
+      `Return JSON that matches the provided schema exactly.\n\n` +
+      `When solving:\n` +
+      `- Be correct and concise.\n` +
+      `- Always respond in step-by-step mode: provide numbered steps and a final answer.\n` +
+      `- Prefer exact values; if decimal, round reasonably (2 decimal places) and show an exact fraction if easy.\n` +
+      `- Use LaTeX ONLY for math expressions, and wrap ONLY in inline \\( ... \\) or display \\[ ... \\].\n` +
+      `- DO NOT use $...$ or $$...$$ delimiters.\n` +
+      `- Use \\frac{a}{b} for fractions (so it renders with a horizontal fraction bar).\n` +
+      `- Never wrap normal words/sentences in LaTeX.\n` +
+      `- Do not put LaTeX inside code fences.\n` +
+      `- If there isn't enough information, ask for the missing info.\n\n` +
       candidatesText;
 
     const schema = {
@@ -236,48 +217,9 @@ export async function POST(req: Request) {
       return jsonErr(msg, 200, true); // 200 so UI shows message inline without generic error
     }
 
-    let finalAnswer = safeString(out?.final_answer, 4000) || "I couldn't generate a solution for that one—try rephrasing the question.";
+    const finalAnswer = safeString(out?.final_answer, 4000) || "I couldn't generate a solution for that one—try rephrasing the question.";
     const steps = Array.isArray(out?.steps) ? out.steps.map((s: unknown) => safeString(s, 800)).filter(Boolean) : [];
     const fullSolution = safeString(out?.full_solution, 12000);
-
-// If the model's final_answer disagrees with the computed result shown in the last step,
-// prefer the last-step result. This helps avoid "correct steps, wrong final answer".
-function stripMathDelims(s: string) {
-  return (s || "")
-    .replace(/\\\(|\\\)|\\\[|\\\]/g, "")
-    .replace(/\$\$|\$/g, "")
-    .trim();
-}
-
-function extractRhsAfterEquals(s: string): string {
-  const t = String(s || "");
-  const i = t.lastIndexOf("=");
-  if (i === -1) return "";
-  return t.slice(i + 1).trim().replace(/[.]+\s*$/g, "");
-}
-
-function canonicalizeNumberUnit(s: string): string {
-  const raw = stripMathDelims(s);
-  // Try to capture a leading number and optional unit.
-  const m = raw.match(/^(-?\d+(?:[.,]\d+)?)(?:\s*([A-Za-z%°µ/\-]+.*))?$/);
-  if (!m) return s.trim();
-  const num = m[1].replace(/,/g, "");
-  const unit = (m[2] || "").trim();
-  return `\\(${num}\\)${unit ? " " + unit : ""}`;
-}
-
-if (steps.length) {
-  const rhs = extractRhsAfterEquals(steps[steps.length - 1]);
-  if (rhs) {
-    const cand = canonicalizeNumberUnit(rhs);
-    const faStripped = stripMathDelims(finalAnswer);
-    const candStripped = stripMathDelims(cand);
-    if (candStripped && faStripped && !faStripped.includes(candStripped)) {
-      // Only override when it's clearly a different value.
-      finalAnswer = cand;
-    }
-  }
-}
 
     // Map lesson indices -> lessons
     const indices: number[] = Array.isArray(out?.relevant_lesson_indices)
@@ -290,11 +232,17 @@ if (steps.length) {
 
     const result: ApiOk["result"] = {
       finalAnswer,
-      steps: steps.length ? steps : undefined,
-      lessons,
       subject,
+      lessons,
       displayText: finalAnswer,
     };
+
+    if (mode === "stepwise" && steps.length) result.steps = steps;
+    if (mode === "full_solution") {
+      // Prefer full_solution; fall back to steps joined
+      result.fullSolution = fullSolution || (steps.length ? steps.map((s: string, i: number) => `${i + 1}. ${s}`).join("\n") : "");
+      if (!result.fullSolution) result.fullSolution = finalAnswer;
+    }
 
     const payload: ApiOk = { ok: true, result };
     return new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } });

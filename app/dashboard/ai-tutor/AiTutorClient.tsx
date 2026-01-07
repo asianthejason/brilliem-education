@@ -40,7 +40,7 @@ declare global {
 }
 
 function MathText({ text, className, mjReady }: { text: string; className?: string; mjReady: boolean }) {
-  const ref = useRef<HTMLSpanElement | null>(null);
+  const ref = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const el = ref.current;
@@ -60,46 +60,6 @@ function MathText({ text, className, mjReady }: { text: string; className?: stri
       {text}
     </div>
   );
-}
-
-
-function sanitizeTutorText(input: string): string {
-  if (!input) return input;
-  let s = input;
-
-  // Normalize common LaTeX commands into readable plain text.
-  s = s.replace(/\\text\{([^}]*)\}/g, "$1");
-  s = s.replace(/\\mathrm\{([^}]*)\}/g, "$1");
-  s = s.replace(/\\times/g, "×");
-  s = s.replace(/\\cdot/g, "·");
-  s = s.replace(/\\left/g, "");
-  s = s.replace(/\\right/g, "");
-
-  // Convert simple fractions: \frac{a}{b} -> (a)/(b)
-  // Run repeatedly to handle multiple fractions in one string.
-  const fracRe = /\\frac\{([^{}]+)\}\{([^{}]+)\}/g;
-  for (let i = 0; i < 5 && fracRe.test(s); i++) {
-    s = s.replace(fracRe, "($1)/($2)");
-  }
-
-  // Convert escaped newlines
-  s = s.replace(/\\\\/g, "\n");
-
-  // Remove remaining backslash commands (e.g., \approx -> approx)
-  s = s.replace(/\\([a-zA-Z]+)/g, "$1");
-
-  // Remove leftover braces used by LaTeX
-  s = s.replace(/[{}]/g, "");
-
-  // Clean spacing
-  s = s.replace(/[ \t]+/g, " ").replace(/ *\n */g, "\n");
-
-  return s.trim();
-}
-
-function sanitizeSteps(steps?: string[]): string[] | undefined {
-  if (!steps) return steps;
-  return steps.map((x) => sanitizeTutorText(x));
 }
 
 type ApiResponse =
@@ -155,7 +115,7 @@ function defaultAssistantGreeting(): ChatMsg {
   return {
     id: uid(),
     role: "assistant",
-    text: "Ask me a math question (type it, or upload a photo). I can do answer-only, full solutions, or step-by-step.",
+    text: "Ask me a math or science question (type it, or upload a photo). I will respond step-by-step.",
   };
 }
 
@@ -183,8 +143,7 @@ function normalizeLoadedChats(raw: any): ChatSession[] | null {
   const out: ChatSession[] = raw
     .map((c: any) => {
       if (!c || typeof c !== "object") return null;
-      const mode: Mode =
-        c.mode === "answer_only" || c.mode === "full_solution" || c.mode === "stepwise" ? c.mode : "stepwise";
+      const mode: Mode = "stepwise";
       const messages: ChatMsg[] = Array.isArray(c.messages) ? c.messages : [defaultAssistantGreeting()];
       return {
         id: typeof c.id === "string" ? c.id : uid(),
@@ -203,7 +162,6 @@ export function AiTutorClient() {
   const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
   const [mathJaxReady, setMathJaxReady] = useState(false);
 
   // Default mode for new chats (user can pick in header; applied when new chat is created)
@@ -216,6 +174,14 @@ export function AiTutorClient() {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const prevMsgCountRef = useRef<number>(0);
 
+  useEffect(() => {
+    try {
+      // In case MathJax has already loaded (fast refresh / cached script).
+      if (window.MathJax && window.MathJax.typesetPromise) setMathJaxReady(true);
+    } catch {
+      // ignore
+    }
+  }, []);
   // Load chats from localStorage
   useEffect(() => {
     try {
@@ -224,7 +190,7 @@ export function AiTutorClient() {
         const first = makeNewChat("stepwise");
         setChats([first]);
         setActiveChatId(first.id);
-        setNewChatMode(first.mode);
+        setNewChatMode("stepwise");
         return;
       }
       const parsed = normalizeLoadedChats(JSON.parse(raw));
@@ -232,26 +198,17 @@ export function AiTutorClient() {
         const first = makeNewChat("stepwise");
         setChats([first]);
         setActiveChatId(first.id);
-        setNewChatMode(first.mode);
+        setNewChatMode("stepwise");
         return;
       }
-      setChats(
-      (parsed || []).map((c: any) => ({
-        ...c,
-        messages: (c.messages || []).map((m: any) =>
-          m?.role === "assistant"
-            ? { ...m, text: sanitizeTutorText(m.text || ""), steps: sanitizeSteps(m.steps), finalAnswer: sanitizeTutorText(m.finalAnswer || "") }
-            : m
-        ),
-      }))
-    );
+      setChats(parsed);
       setActiveChatId(parsed[0].id);
-      setNewChatMode(parsed[0].mode);
+      setNewChatMode("stepwise");
     } catch {
       const first = makeNewChat("stepwise");
       setChats([first]);
       setActiveChatId(first.id);
-      setNewChatMode(first.mode);
+      setNewChatMode("stepwise");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -273,7 +230,7 @@ export function AiTutorClient() {
 
   // Keep new-chat mode aligned to active chat when switching chats (so "New" creates same mode by default)
   useEffect(() => {
-    if (activeChat?.mode) setNewChatMode(activeChat.mode);
+    if (activeChat?.mode) setNewChatMode("stepwise");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeChatId]);
 
@@ -319,7 +276,7 @@ export function AiTutorClient() {
   }
 
   function newChat(mode?: Mode) {
-    const m = mode || newChatMode;
+    const m: Mode = "stepwise";
     const c = makeNewChat(m);
     setChats((prev) => [c, ...prev]);
     setActiveChatId(c.id);
@@ -339,12 +296,12 @@ export function AiTutorClient() {
       if (next.length === 0) {
         const c = makeNewChat("stepwise");
         setActiveChatId(c.id);
-        setNewChatMode(c.mode);
+        setNewChatMode("stepwise");
         return [c];
       }
       if (activeChatId === chatId) {
         setActiveChatId(next[0].id);
-        setNewChatMode(next[0].mode);
+        setNewChatMode("stepwise");
       }
       return next;
     });
@@ -399,7 +356,7 @@ export function AiTutorClient() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          mode: activeChat.mode, // 🔒 per-chat mode
+          mode: "stepwise", // 🔒 per-chat mode
           message: userMsg.text || "",
           text: userMsg.text || "", // backwards-compat if you ever change server keys
           imageDataUrl: userMsg.imageDataUrl || null,
@@ -423,8 +380,8 @@ export function AiTutorClient() {
             id: uid(),
             role: "assistant",
             text: r.displayText || "Here’s the first step.",
-            steps: sanitizeSteps(r.steps),
-            finalAnswer: sanitizeTutorText(r.finalAnswer),
+            steps: r.steps,
+            finalAnswer: r.finalAnswer,
             lessons: r.lessons,
             stepRevealCount: 1,
           },
@@ -435,9 +392,9 @@ export function AiTutorClient() {
           {
             id: uid(),
             role: "assistant",
-            text: sanitizeTutorText(r.displayText || r.finalAnswer),
-            steps: sanitizeSteps(r.steps),
-            finalAnswer: sanitizeTutorText(r.finalAnswer),
+            text: r.displayText || r.finalAnswer,
+            steps: r.steps,
+            finalAnswer: r.finalAnswer,
             lessons: r.lessons,
           },
         ]);
@@ -496,7 +453,7 @@ export function AiTutorClient() {
         return { ...c, mode: m };
       })
     );
-    setNewChatMode(m);
+    setNewChatMode("stepwise");
   }
 
   return (
@@ -505,8 +462,8 @@ export function AiTutorClient() {
         {`
           window.MathJax = {
             tex: {
-              inlineMath: [['\\(','\\)'], ['$', '$']],
-              displayMath: [['$$','$$'], ['\\[','\\]']],
+              inlineMath: [['\\(','\\)']],
+              displayMath: [['\\[','\\]']],
               processEscapes: true
             },
             options: { skipHtmlTags: ['script','noscript','style','textarea','pre','code'] }
@@ -517,7 +474,8 @@ export function AiTutorClient() {
         id="mathjax-script"
         strategy="afterInteractive"
         src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"
-      onLoad={() => setMathJaxReady(true)} />
+        onLoad={() => setMathJaxReady(true)}
+      />
 <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm flex flex-col h-[calc(100vh-220px)] overflow-hidden">
       {/* Header */}
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
@@ -526,35 +484,9 @@ export function AiTutorClient() {
           <p className="mt-1 text-sm text-slate-600">
             Math & science homework help (type a question or upload a photo). If you ask something outside math/science, it will be rejected.
           </p>
-          {chatLocked ? (
-            <div className="mt-2 text-xs text-slate-500">
-              Mode is locked for this chat: <span className="font-semibold text-slate-700">{modeLabelLong(activeChat.mode)}</span>. Start a new chat to change the mode.
-            </div>
-          ) : (
-            <div className="mt-2 text-xs text-slate-500">Choose a mode for this chat before you send your first message.</div>
-          )}
         </div>
 
         <div className="flex items-center gap-2">
-          <div className="w-full md:w-auto inline-flex flex-nowrap items-center gap-1 rounded-full border border-slate-200 bg-white p-1 text-xs sm:text-sm max-w-full overflow-x-auto">
-            {(["answer_only", "full_solution", "stepwise"] as Mode[]).map((m) => (
-              <button
-                key={m}
-                type="button"
-                aria-disabled={chatLocked && m !== activeChat.mode}
-                onClick={() => {
-                  if (chatLocked && m !== activeChat.mode) return;
-                  onSelectMode(m);
-                }}
-                className={`shrink-0 rounded-full px-2.5 sm:px-3 py-1.5 font-semibold whitespace-nowrap ${
-                  activeChat.mode === m ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-50"
-                } ${chatLocked && m !== activeChat.mode ? "opacity-50 cursor-not-allowed hover:bg-transparent" : ""}`}
-                title={chatLocked && m !== activeChat.mode ? "Start a new chat to change the mode." : modeLabel(m)}
-              >
-                <span className="hidden sm:inline">{modeLabelLong(m)}</span><span className="sm:hidden">{modeLabelShort(m)}</span>
-              </button>
-            ))}
-          </div>
         </div>
       </div>
 
@@ -574,7 +506,7 @@ export function AiTutorClient() {
             </button>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-2">
+          <div className="flex-1 overflow-y-auto overflow-x-hidden p-2">
             <div className="grid gap-2">
               {chats.map((c) => {
                 const active = c.id === activeChat.id;
@@ -594,9 +526,6 @@ export function AiTutorClient() {
                         <div className="truncate text-sm font-semibold text-slate-900">{c.title || "New chat"}</div>
                         <div className="mt-0.5 flex items-center gap-2">
                           <span className="truncate text-[11px] text-slate-500">{subtitle}</span>
-                          <span className="inline-flex items-center justify-center rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-700">
-                            {modeShort(c.mode)}
-                          </span>
                         </div>
                       </div>
                       <button
@@ -647,7 +576,7 @@ export function AiTutorClient() {
                           <ol className="mt-2 list-decimal space-y-1 pl-5 text-slate-900">
                             {(m.stepRevealCount ? m.steps.slice(0, m.stepRevealCount) : m.steps).map((s, idx) => (
                               <li key={idx} className="whitespace-pre-wrap">
-                                {s}
+                                <MathText text={s} mjReady={mathJaxReady} className="whitespace-pre-wrap" />
                               </li>
                             ))}
                           </ol>
@@ -746,8 +675,6 @@ export function AiTutorClient() {
                   >
                     Upload photo
                   </label>
-
-                  <div className="text-xs text-slate-500">Mode: {modeLabelLong(activeChat.mode)}</div>
                 </div>
 
                 <button
