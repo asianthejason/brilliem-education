@@ -325,7 +325,27 @@ export function AiTutorClient() {
     );
   }
 
-  function maybeSetChatTitleFromFirstUserMessage(userText: string) {
+  
+  function revealNextStep(msgId: string) {
+    updateActiveChatMessages((prev) =>
+      prev.map((m) => {
+        if (m.id !== msgId || m.role !== "assistant" || !m.steps || m.steps.length === 0) return m;
+        const cur = typeof m.stepRevealCount === "number" ? m.stepRevealCount : 1;
+        return { ...m, stepRevealCount: Math.min(cur + 1, m.steps.length) };
+      })
+    );
+  }
+
+  function revealAllSteps(msgId: string) {
+    updateActiveChatMessages((prev) =>
+      prev.map((m) => {
+        if (m.id !== msgId || m.role !== "assistant" || !m.steps || m.steps.length === 0) return m;
+        return { ...m, stepRevealCount: m.steps.length };
+      })
+    );
+  }
+
+function maybeSetChatTitleFromFirstUserMessage(userText: string) {
     setChats((prevChats) =>
       prevChats.map((c) => {
         if (c.id !== activeChat.id) return c;
@@ -480,7 +500,7 @@ export function AiTutorClient() {
           steps,
           finalAnswer: normalizeTutorText(r.finalAnswer || ""),
           lessons: r.lessons,
-          stepRevealCount: steps.length, // show all steps by default
+          stepRevealCount: steps.length ? 1 : undefined, // reveal 1 step at a time
         },
       ]);
     } catch (e: any) {
@@ -609,14 +629,33 @@ export function AiTutorClient() {
                           <div className="mt-3">
                             <div className="text-xs font-semibold text-slate-600">Steps</div>
                             <ol className="mt-2 list-decimal space-y-1 pl-5 text-slate-900">
-                              {(m.stepRevealCount ? m.steps.slice(0, m.stepRevealCount) : m.steps).map((s, idx) => (
+                              {m.steps.slice(0, typeof m.stepRevealCount === "number" ? m.stepRevealCount : 1).map((s, idx) => (
                                 <li key={idx} className="whitespace-pre-wrap">
                                   <MathText text={normalizeTutorText(s)} mjReady={mathJaxReady} />
                                 </li>
                               ))}
                             </ol>
+                            {m.steps && m.steps.length > 0 && (m.stepRevealCount ?? 1) < m.steps.length && (
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => revealNextStep(m.id)}
+                                  className="rounded-lg bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-800"
+                                >
+                                  Next step
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => revealAllSteps(m.id)}
+                                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-semibold text-slate-900 hover:bg-slate-50"
+                                >
+                                  Show all
+                                </button>
+                              </div>
+                            )}
 
-                            {m.finalAnswer ? (
+
+                            {m.finalAnswer && (!m.steps || m.steps.length === 0 || (m.stepRevealCount ?? 1) >= m.steps.length) ? (
                               <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
                                 <span className="font-semibold">Final answer:</span>{" "}
                                 <MathText text={normalizeTutorText(m.finalAnswer)} mjReady={mathJaxReady} className="inline" />

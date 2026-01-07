@@ -42,58 +42,120 @@ function normalizeForCompare(s: string): string {
 }
 
 function deriveFinalAnswerFromSteps(steps: string[]): string {
-  const lastRaw =
-    [...steps].reverse().map((s) => safeString(s, 4000)).find(Boolean) || "";
-  if (!lastRaw) return "";
+  const cleaned = (Array.isArray(steps) ? steps : [])
+    .map((s) => safeString(s, 4000))
+    .map((s) => s.replace(/^\s*(?:\d+[\).:\-]\s*)/, "").trim())
+    .filter(Boolean);
 
-  // Remove any leading "1." / "1)" / etc.
-  const last = lastRaw.replace(/^\s*(?:\d+[\).:\-]\s*)/, "").trim();
+  if (!cleaned.length) return "";
 
-  // If there's an '=', prefer whatever is after the last '='.
-  const rhs = (() => {
-    const idx = last.lastIndexOf("=");
-    if (idx !== -1 && idx < last.length - 1) return last.slice(idx + 1).trim();
-    return last;
-  })();
+  const phraseRes: RegExp[] = [
+    /\bfinal\s+(?:answer|result)\s*(?:is|:)?\s*/i,
+    /\btherefore\b[, ]*\s*(?:the\s+)?(?:final\s+)?(?:answer|result)\s*(?:is|:)?\s*/i,
+    /\bso\b[, ]*\s*(?:the\s+)?(?:final\s+)?(?:answer|result)\s*(?:is|:)?\s*/i,
+    /\bthe\s+(?:final\s+)?result\s*(?:is|:)?\s*/i,
+    /\bthe\s+(?:final\s+)?answer\s*(?:is|:)?\s*/i,
+    /\bwrite\s+(?:the\s+)?(?:sum|result|answer)\s+as\s*/i,
+    /\bthe\s+sum\s+is\s*/i,
+  ];
 
-  // 1) Prefer the last explicit MathJax-delimited expression (and keep it delimited so it renders).
-  const mathMatches = [...rhs.matchAll(/\\\(([\s\S]*?)\\\)|\\\[(\s*[\s\S]*?\s*)\\\]/g)];
-  if (mathMatches.length) {
-    const m = mathMatches[mathMatches.length - 1]!;
-    const full = m[0];
-    const end = (m.index ?? 0) + full.length;
+  const pickMathFromSegment = (segRaw: string, preferFirst: boolean): string => {
+    if (!segRaw) return "";
+    const seg = segRaw.trim();
 
-    // Capture simple trailing units right after the math, e.g. "\(15\) m/s"
-    const tail = rhs.slice(end);
-    const unit = tail.match(/^\s*([a-zA-Z°/%]+(?:\/[a-zA-Z°]+)?)\b/);
-    return (full + (unit ? ` ${unit[1]}` : "")).trim();
+    // If we have a mixed number like "10 \( \frac{5}{6} \)" capture it as one math expression.
+    const mixedWrapped = seg.match(/\b(\d+)\s*\\\(\s*(\\frac\{[^{}]+\}\{[^{}]+\})\s*\\\)/);
+    if (mixedWrapped) {
+      const whole = mixedWrapped[1];
+      const frac = mixedWrapped[2];
+      return `\\(${whole} ${frac}\\)`;
+    }
+
+    // 1) MathJax-delimited expressions.
+    const mathMatches = [...seg.matchAll(/\\\(([\s\S]*?)\\\)|\\\[(\s*[\s\S]*?\s*)\\\]/g)];
+    if (mathMatches.length) {
+      const lower = seg.toLowerCase();
+      const alsoIdx = lower.search(/\b(?:also|alternatively)\b/);
+
+      const candidates = mathMatches
+        .map((m) => ({ full: m[0], idx: m.index ?? 0 }))
+        .sort((a, b) => a.idx - b.idx);
+
+      // If the sentence has "also ...", prefer the expression before "also"
+      if (alsoIdx >= 0) {
+        const before = candidates.filter((c) => c.idx < alsoIdx);
+        if (before.length) return preferFirst ? before[0].full : before[before.length - 1].full;
+      }
+
+      return preferFirst ? candidates[0].full : candidates[candidates.length - 1].full;
+    }
+
+    // 2) TeX \frac{a}{b}
+    const fracMatches = [...seg.matchAll(/\\frac\{[^{}]+\}\{[^{}]+\}/g)];
+    if (fracMatches.length) {
+      const frac = fracMatches[preferFirst ? 0 : fracMatches.length - 1]![0];
+      // Capture mixed number like "10 \frac{5}{6}" if present just before
+      const before = seg.slice(0, fracMatches[preferFirst ? 0 : fracMatches.length - 1]!.index ?? 0);
+      const whole = before.match(/\b(\d+)\s*$/);
+      if (whole) return `\\(${whole[1]} ${frac}\\)`;
+      return `\\(${frac}\\)`;
+    }
+
+    // 3) Simple numeric fraction like 41/28
+    const slashFracMatches = [...seg.matchAll(/\b(\d+)\s*\/\s*(\d+)\b/g)];
+    if (slashFracMatches.length) {
+      const m = slashFracMatches[preferFirst ? 0 : slashFracMatches.length - 1]!;
+      const a = m[1];
+      const b = m[2];
+      const before = seg.slice(0, m.index ?? 0);
+      const whole = before.match(/\b(\d+)\s*$/);
+      if (whole) return `\\(${whole[1]} \\frac{${a}}{${b}}\\)`;
+      return `\\(\\frac{${a}}{${b}}\\)`;
+    }
+
+    // 4) Last number (integer/decimal) with optional unit
+    const numMatches = [...seg.matchAll(/(-?\d+(?:\.\d+)?)(?:\s*([a-zA-Z°/%]+(?:\/[a-zA-Z°]+)?)\b)?/g)];
+    if (numMatches.length) {
+      const chosen = numMatches[preferFirst ? 0 : numMatches.length - 1]!;
+      const n = chosen[1];
+      const unit = chosen[2];
+      return (n + (unit ? ` ${unit}` : "")).trim();
+    }
+
+    return "";
+  };
+
+  const extractFromText = (s: string): string => {
+    if (!s) return "";
+
+    // If there's an '=', prefer whatever is after the last '='.
+    const rhs = (() => {
+      const idx = s.lastIndexOf("=");
+      if (idx !== -1 && idx < s.length - 1) return s.slice(idx + 1).trim();
+      return s;
+    })();
+
+    // Phrase-based: use the first expression after the phrase (avoids grabbing "... can also be written as ...")
+    for (const re of phraseRes) {
+      const m = re.exec(s);
+      if (m && typeof m.index === "number") {
+        const after = s.slice(m.index + m[0].length);
+        const picked = pickMathFromSegment(after, true);
+        if (picked) return picked;
+      }
+    }
+
+    // Otherwise pick from RHS. Use also/alternatively heuristic to avoid grabbing the alternative.
+    return pickMathFromSegment(rhs, false);
+  };
+
+  // Walk backwards to find the best "final/result/answer" phrasing; fall back to the last step.
+  for (let i = cleaned.length - 1; i >= 0; i--) {
+    const cand = extractFromText(cleaned[i]);
+    if (cand) return cand;
   }
 
-  // 2) Prefer a TeX \frac{a}{b} (wrap in \( \) so it renders nicely).
-  const fracMatches = [...rhs.matchAll(/\\frac\{[^{}]+\}\{[^{}]+\}/g)];
-  if (fracMatches.length) {
-    const frac = fracMatches[fracMatches.length - 1]![0];
-    return `\\(${frac}\\)`;
-  }
-
-  // 3) Prefer a simple numeric fraction like 41/28 and convert to \frac for horizontal bar.
-  const slashFracMatches = [...rhs.matchAll(/\b(\d+)\s*\/\s*(\d+)\b/g)];
-  if (slashFracMatches.length) {
-    const m = slashFracMatches[slashFracMatches.length - 1]!;
-    const a = m[1];
-    const b = m[2];
-    return `\\(\\frac{${a}}{${b}}\\)`;
-  }
-
-  // 4) Fall back to the last number(+optional unit) in the line.
-  const cleaned = stripMathDelimsAndTex(rhs);
-  const hits = cleaned.match(/[-+]?\d+(?:\.\d+)?(?:\s*[a-zA-Z°/%]+(?:\/[a-zA-Z°]+)?)?/g);
-  if (hits && hits.length) {
-    const cand = hits[hits.length - 1].trim();
-    if (cand && /\d/.test(cand)) return cand;
-  }
-
-  return "";
+  return extractFromText(cleaned[cleaned.length - 1]);
 }
 
 function looksLikeMathExpr(s: string): boolean {
