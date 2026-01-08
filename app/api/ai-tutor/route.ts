@@ -41,6 +41,26 @@ function normalizeForCompare(s: string): string {
   return s.toLowerCase().replace(/\s+/g, "").replace(/[\u2018\u2019\u201C\u201D]/g, "");
 }
 
+function looksLikeNumericOrMathAnswer(rawWithTex: string): boolean {
+  const raw = String(rawWithTex || "").trim();
+  if (!raw) return false;
+
+  // Any explicit TeX/math delimiter strongly suggests this is quantitative.
+  if (/\\\(|\\\[|\\frac\{|\\sqrt\{|\\times\b|\\div\b|\\cdot\b|\\sum\b|\\int\b/.test(raw)) return true;
+
+  const plain = stripMathDelimsAndTex(raw);
+  if (!plain) return false;
+
+  // If it contains operators alongside digits, it's almost certainly math.
+  if (/\d/.test(plain) && /[=<>+*/^]/.test(plain)) return true;
+
+  // Plain numeric (optionally with unit).
+  if (/^-?\d+(?:\.\d+)?(?:\s*[a-zA-Z°/%]+(?:\/[a-zA-Z°]+)?)?$/.test(plain)) return true;
+  if (/^\d+\s*\/\s*\d+(?:\s*[a-zA-Z°/%]+(?:\/[a-zA-Z°]+)?)?$/.test(plain)) return true;
+
+  return false;
+}
+
 function deriveFinalAnswerFromSteps(steps: string[]): string {
   const cleaned = (Array.isArray(steps) ? steps : [])
     .map((s) => safeString(s, 4000))
@@ -50,11 +70,14 @@ function deriveFinalAnswerFromSteps(steps: string[]): string {
   if (!cleaned.length) return "";
 
   const phraseRes: RegExp[] = [
-    /\bfinal\s+(?:answer|result)\s*(?:is|:)?\s*/i,
-    /\btherefore\b[, ]*\s*(?:the\s+)?(?:final\s+)?(?:answer|result)\s*(?:is|:)?\s*/i,
-    /\bso\b[, ]*\s*(?:the\s+)?(?:final\s+)?(?:answer|result)\s*(?:is|:)?\s*/i,
-    /\bthe\s+(?:final\s+)?result\s*(?:is|:)?\s*/i,
-    /\bthe\s+(?:final\s+)?answer\s*(?:is|:)?\s*/i,
+    /\bfinal\s+(?:answer|result)\s*(?:is|:|-)?\s*/i,
+    /\bfinal\s+answer\s*[:\-]\s*/i,
+    /\banswer\s*[:\-]\s*/i,
+    /\bstate\s+the\s+final\s+answer\s*(?:is|:|-)?\s*/i,
+    /\btherefore\b[, ]*\s*(?:the\s+)?(?:final\s+)?(?:answer|result)\s*(?:is|:|-)?\s*/i,
+    /\bso\b[, ]*\s*(?:the\s+)?(?:final\s+)?(?:answer|result)\s*(?:is|:|-)?\s*/i,
+    /\bthe\s+(?:final\s+)?result\s*(?:is|:|-)?\s*/i,
+    /\bthe\s+(?:final\s+)?answer\s*(?:is|:|-)?\s*/i,
     /\bwrite\s+(?:the\s+)?(?:sum|result|answer)\s+as\s*/i,
     /\bthe\s+sum\s+is\s*/i,
   ];
@@ -62,6 +85,14 @@ function deriveFinalAnswerFromSteps(steps: string[]): string {
   const pickMathFromSegment = (segRaw: string, preferFirst: boolean): string => {
     if (!segRaw) return "";
     const seg = segRaw.trim();
+
+    // If the answer is a named identifier (common in science/chemistry), preserve it.
+    // Examples: "RDS-1", "H2SO4", "NaCl".
+    const idMatches = [...seg.matchAll(/\b([A-Za-z]{1,6}\d{0,3}(?:-[A-Za-z0-9]{1,6})+)\b/g)];
+    if (idMatches.length) {
+      const chosen = idMatches[preferFirst ? 0 : idMatches.length - 1]![1];
+      return chosen.replace(/^"|"$/g, "");
+    }
 
     // If we have a mixed number like "10 \( \frac{5}{6} \)" capture it as one math expression.
     const mixedWrapped = seg.match(/\b(\d+)\s*\\\(\s*(\\frac\{[^{}]+\}\{[^{}]+\})\s*\\\)/);
@@ -388,7 +419,11 @@ export async function POST(req: Request) {
     const systemPrompt =
       `You are Brilliem AI Tutor. You ONLY help with Math or Science homework.
 ` +
+      `Science includes physics, chemistry, biology, earth/space science, and science/technology history when it is relevant to a science class (discoveries, inventions, experiments, scientific devices).
+` +
       `If the user asks anything outside math/science (gaming, programming, essays, general chat), refuse.
+` +
+      `Safety: you may discuss scientific concepts and historical facts at a high level, but do NOT provide instructions to build weapons or to harm people.
 
 ` +
       `Return JSON that matches the provided schema exactly.
@@ -410,10 +445,10 @@ export async function POST(req: Request) {
 ` +
       `- Only use MathJax LaTeX for *math expressions*, wrapped with inline \\(...\\) or display \\[...\\].
 - IMPORTANT: You are returning JSON. Every backslash must be escaped as two backslashes.
-  Example: write "\\frac{1}{2}" and "\\(\\frac{1}{2}\\)" (NOT "\frac{1}{2}").
+  Example: write "\\frac{1}{2}" and "\\(\\frac{1}{2}\\)" (NOT "\\frac{1}{2}").
 - NEVER wrap normal words/sentences in math delimiters.
 - Do NOT use $...$ or $$...$$ delimiters.
-- For division/fractions, use \frac{a}{b} inside a math delimiter so it renders with a horizontal fraction bar.
+- For division/fractions, use \\frac{a}{b} inside a math delimiter so it renders with a horizontal fraction bar.
 - Put units (km/h, m/s, N, kg, s) outside math delimiters whenever possible.
 ` +
       `- Do not put LaTeX inside code fences.
@@ -491,11 +526,22 @@ export async function POST(req: Request) {
     let steps = Array.isArray(out?.steps) ? out.steps.map((s: unknown) => normalizeTutorOutput(safeString(s, 900))).filter(Boolean) : [];
 
     // If the model's final_answer drifts from the computed result in the last step, trust the last step.
+    // IMPORTANT: Only auto-override when the answer is clearly quantitative.
+    // Otherwise, science/history identifiers like "RDS-1" can be incorrectly reduced to "-1".
     const derived = deriveFinalAnswerFromSteps(steps);
     if (derived) {
-      const a = normalizeForCompare(stripMathDelimsAndTex(finalAnswer));
-      const d = normalizeForCompare(stripMathDelimsAndTex(derived));
-      if (!a || a !== d) finalAnswer = normalizeTutorOutput(derived);
+      const aPlain = normalizeForCompare(stripMathDelimsAndTex(finalAnswer));
+      const dPlain = normalizeForCompare(stripMathDelimsAndTex(derived));
+
+      const finalIsQuant = looksLikeNumericOrMathAnswer(finalAnswer);
+      const derivedIsQuant = looksLikeNumericOrMathAnswer(derived);
+
+      const shouldOverride =
+        !aPlain ||
+        (subject === "math" && dPlain && aPlain !== dPlain) ||
+        (subject === "science" && finalIsQuant && derivedIsQuant && dPlain && aPlain !== dPlain);
+
+      if (shouldOverride) finalAnswer = normalizeTutorOutput(derived);
     }
     finalAnswer = dedupeTrailingUnits(finalAnswer);
 
