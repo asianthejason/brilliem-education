@@ -121,6 +121,10 @@ function wrapBareTeXInPlainSegments(text: string): string {
     // Wrap bare \frac{a}{b} so it renders with a horizontal bar.
     s = s.replace(/\\frac\{[^{}]+\}\{[^{}]+\}/g, (f) => `\\(${f}\\)`);
 
+    // Render common TeX operator commands even when the model forgets math delimiters.
+    // Example: "65 \\div 6" or "1 \\times 2" -> the operator itself becomes MathJax inline math.
+    s = s.replace(/\\(times|div|cdot)\b/g, (_m, cmd) => `\\(\\${cmd}\\)`);
+
     // Wrap simple numeric fractions like 3/4 -> \(\frac{3}{4}\)
     s = s.replace(/\b(\d{1,4})\s*\/\s*(\d{1,4})\b/g, (_m, a, b) => `\\(\\frac{${a}}{${b}}\\)`);
 
@@ -255,6 +259,17 @@ export function AiTutorClient() {
   const [error, setError] = useState<string | null>(null);
 
   const [mathJaxReady, setMathJaxReady] = useState(false);
+
+  // Next.js de-dupes <Script> tags by id/src across client navigations.
+  // When users leave this page and come back, MathJax may already be loaded,
+  // but the Script onLoad callback won't fire again. Detect that case so we
+  // still typeset math reliably on every visit.
+  useEffect(() => {
+    const mj = window.MathJax;
+    if (mj && typeof mj.typesetPromise === "function") {
+      setMathJaxReady(true);
+    }
+  }, []);
 
   const [chats, setChats] = useState<ChatSession[]>(() => [makeNewChat()]);
   const [activeChatId, setActiveChatId] = useState<string>("");
