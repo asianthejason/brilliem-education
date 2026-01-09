@@ -111,6 +111,78 @@ function wrapBareTeXInPlainSegments(text: string): string {
   let last = 0;
   let m: RegExpExecArray | null;
 
+  const buildChemLatex = (tok: string): string => {
+    const raw = tok.trim();
+    if (!raw) return raw;
+
+    const chargeMatch = raw.match(/^(.*?)(?:\^)?(\d*)([+-])$/);
+    let base = raw;
+    let charge: string | null = null;
+    if (chargeMatch && chargeMatch[1]) {
+      base = chargeMatch[1];
+      const mag = chargeMatch[2] || "";
+      const sign = chargeMatch[3];
+      charge = `${mag}${sign}`;
+    }
+
+    const groups = [...base.matchAll(/([A-Z][a-z]?)(\d*)/g)];
+    if (!groups.length) return raw;
+
+    let built = groups
+      .map((g) => {
+        const el = g[1];
+        const num = g[2];
+        return num ? `${el}_${num}` : el;
+      })
+      .join("");
+
+    if (charge) built += `^{${charge}}`;
+    return `\\mathrm{${built}}`;
+  };
+
+  const wrapChemToken = (tok: string): string => `\\(${buildChemLatex(tok)}\\)`;
+
+  const formatChemicalEquation = (eqRaw: string): string => {
+    const eq = eqRaw.trim();
+    const tokens = eq
+      .replace(/→/g, "->")
+      .replace(/\s+/g, " ")
+      .split(" ")
+      .filter(Boolean);
+
+    const outTokens: string[] = [];
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i];
+
+      if (t === "+") {
+        outTokens.push("+");
+        continue;
+      }
+      if (t === "->") {
+        outTokens.push("\\rightarrow");
+        continue;
+      }
+
+      const core = t.replace(/^[\(\[\{]+/, "").replace(/[\)\]\}\.,;:]+$/, "");
+
+      if (/^\d+$/.test(core)) {
+        outTokens.push(core);
+        continue;
+      }
+
+      if (/^[A-Za-z0-9]+(?:\^?\d*[+-])?$/.test(core) && /[A-Z]/.test(core)) {
+        const prev = outTokens[outTokens.length - 1];
+        if (prev && /^\d+$/.test(prev)) outTokens[outTokens.length - 1] = `${prev}\\,`;
+        outTokens.push(buildChemLatex(core));
+        continue;
+      }
+
+      outTokens.push(core);
+    }
+
+    return `\\(${outTokens.join(" ")}\\)`;
+  };
+
   const processPlain = (seg: string) => {
     let s = seg;
 
@@ -122,11 +194,39 @@ function wrapBareTeXInPlainSegments(text: string): string {
     s = s.replace(/\\frac\{[^{}]+\}\{[^{}]+\}/g, (f) => `\\(${f}\\)`);
 
     // Render common TeX operator commands even when the model forgets math delimiters.
-    // Example: "65 \\div 6" or "1 \\times 2" -> the operator itself becomes MathJax inline math.
     s = s.replace(/\\(times|div|cdot)\b/g, (_m, cmd) => `\\(\\${cmd}\\)`);
 
     // Wrap simple numeric fractions like 3/4 -> \(\frac{3}{4}\)
     s = s.replace(/\b(\d{1,4})\s*\/\s*(\d{1,4})\b/g, (_m, a, b) => `\\(\\frac{${a}}{${b}}\\)`);
+
+    // Wrap common scientific notation like 6.022 x 10^23
+    s = s.replace(
+      /\b(\d+(?:\.\d+)?)\s*(?:×|x|\*)\s*10\s*\^\s*\{?\s*([+-]?\d+)\s*\}?\b/gi,
+      (_m, a, e) => `\\(${a} \\times 10^{${e}}\\)`
+    );
+
+    // Wrap chemistry equations like "4 Fe + 3 O2 -> 2 Fe2O3"
+    s = s.replace(
+      /(?:\b\d+\s*)?(?:[A-Z][a-z]?\d*)+(?:\s*\+\s*(?:\d+\s*)?(?:[A-Z][a-z]?\d*)+)*\s*(?:->|→)\s*(?:\d+\s*)?(?:[A-Z][a-z]?\d*)+(?:\s*\+\s*(?:\d+\s*)?(?:[A-Z][a-z]?\d*)+)*/g,
+      (eq) => formatChemicalEquation(eq)
+    );
+
+    // Wrap standalone chemical tokens like NO3^- or Fe2O3 or NaCl (avoid short acronyms like AI and astronomy labels like M31)
+    s = s.replace(/\b([A-Z][A-Za-z0-9]{1,12}(?:\^?\d*[+-])?)\b/g, (_m, tok) => {
+      const t = String(tok);
+
+      const hasCharge = /[+-]$/.test(t);
+      const hasLower = /[a-z]/.test(t);
+      const multiElement = (t.match(/[A-Z]/g) || []).length >= 2;
+
+      if (/^[A-Z]\d{1,3}$/.test(t)) return t; // M31, M87, etc.
+      if (/^[A-Z]{2,4}$/.test(t)) return t; // AI, DNA, etc.
+
+      if (!hasCharge && !/\d/.test(t) && !multiElement) return t;
+      if (!hasCharge && !hasLower && !multiElement) return t;
+
+      return wrapChemToken(t);
+    });
 
     return s;
   };
@@ -165,12 +265,14 @@ function MathText({
   text,
   className,
   mjReady,
+  as = "div",
 }: {
   text: string;
   className?: string;
   mjReady: boolean;
+  as?: "div" | "span";
 }) {
-  const ref = useRef<HTMLDivElement | null>(null);
+  const ref = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     const el = ref.current;
@@ -185,10 +287,12 @@ function MathText({
     mj.typesetPromise([el]).catch(() => {});
   }, [text, mjReady]);
 
+  const Tag = as as any;
+
   return (
-    <div ref={ref} className={className} style={{ whiteSpace: "pre-wrap" }}>
+    <Tag ref={ref as any} className={className} style={{ whiteSpace: "pre-wrap" }}>
       {text}
-    </div>
+    </Tag>
   );
 }
 
@@ -673,7 +777,7 @@ function maybeSetChatTitleFromFirstUserMessage(userText: string) {
                             {m.finalAnswer && (!m.steps || m.steps.length === 0 || (m.stepRevealCount ?? 1) >= m.steps.length) ? (
                               <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
                                 <span className="font-semibold">Final answer:</span>{" "}
-                                <MathText text={normalizeTutorText(m.finalAnswer)} mjReady={mathJaxReady} className="inline" />
+                                <MathText text={normalizeTutorText(m.finalAnswer)} mjReady={mathJaxReady} as="span" className="inline" />
                               </div>
                             ) : null}
                           </div>
