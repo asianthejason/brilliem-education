@@ -145,12 +145,6 @@ function normalizeTutorText(text: string): string {
   if (!text) return "";
   let out = restoreJsonEscapedLatex(String(text));
 
-  // Strip control characters that can appear when backslashes are not escaped correctly in JSON
-  // (e.g. "\times" -> tab + "imes"). Keep newlines, but remove other non-printing chars.
-  out = out.replace(/\u00ad/g, ""); // soft hyphen
-  out = out.replace(/\t/g, " ");
-  out = out.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
-
   // Convert $/$$ delimiters into MathJax-safe delimiters (only if it looks like math).
   out = out.replace(/\$\$([\s\S]*?)\$\$/g, (m, inner) => (looksLikeMathExpr(inner) ? `\\[${inner}\\]` : inner));
   out = out.replace(/\$([^\n$]{1,300}?)\$/g, (m, inner) => (looksLikeMathExpr(inner) ? `\\(${inner}\\)` : inner));
@@ -229,11 +223,29 @@ function normalizeLoadedChats(raw: any): ChatSession[] | null {
       const normalizedMessages: ChatMsg[] = messages.map((m: any) => {
         if (!m || typeof m !== "object") return null;
         if (m.role === "assistant") {
+          const stepsArr = Array.isArray(m.steps)
+            ? m.steps
+                .map((s: any) => normalizeTutorText(String(s || "")))
+                .filter(Boolean)
+            : undefined;
+
+          // Restore the "one step at a time" UX even for older chats stored in localStorage.
+          // If a previous version saved all steps revealed (stepRevealCount >= steps length),
+          // we reset it back to 1 so students can progress step-by-step again.
+          const rawReveal = Number((m as any).stepRevealCount);
+          const stepRevealCount =
+            stepsArr && stepsArr.length
+              ? Number.isFinite(rawReveal) && rawReveal >= 1 && rawReveal < stepsArr.length
+                ? rawReveal
+                : 1
+              : undefined;
+
           return {
             ...m,
             text: normalizeTutorText(String(m.text || "")),
-            steps: Array.isArray(m.steps) ? m.steps.map((s: any) => normalizeTutorText(String(s || ""))).filter(Boolean) : undefined,
+            steps: stepsArr,
             finalAnswer: m.finalAnswer ? normalizeTutorText(String(m.finalAnswer)) : undefined,
+            stepRevealCount,
           };
         }
         if (m.role === "user") {
@@ -517,11 +529,11 @@ function maybeSetChatTitleFromFirstUserMessage(userText: string) {
         {
           id: uid(),
           role: "assistant",
-          text: normalizeTutorText(r.displayText || ""),
+          text: normalizeTutorText(r.displayText || "Step-by-step solution:"),
           steps,
           finalAnswer: normalizeTutorText(r.finalAnswer || ""),
           lessons: r.lessons,
-          stepRevealCount: steps.length ? steps.length : undefined, // show all steps by default
+          stepRevealCount: steps.length ? 1 : undefined, // reveal 1 step at a time
         },
       ]);
     } catch (e: any) {
@@ -632,8 +644,6 @@ function maybeSetChatTitleFromFirstUserMessage(userText: string) {
                       <div className="max-w-[min(720px,92%)] rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm">
                         {isUser ? (
                           <div className="whitespace-pre-wrap text-slate-900">{m.text || ""}</div>
-                        ) : m.steps && m.steps.length > 0 ? (
-                          <div className="text-xs font-semibold text-slate-600">Step-by-step solution</div>
                         ) : (
                           <MathText text={normalizeTutorText(m.text)} mjReady={mathJaxReady} className="text-slate-900" />
                         )}
@@ -672,13 +682,18 @@ function maybeSetChatTitleFromFirstUserMessage(userText: string) {
                                   onClick={() => revealAllSteps(m.id)}
                                   className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-semibold text-slate-900 hover:bg-slate-50"
                                 >
-                                  Show all
+                                  Show rest
                                 </button>
                               </div>
                             )}
 
 
-                            
+                            {m.finalAnswer && (!m.steps || m.steps.length === 0 || (m.stepRevealCount ?? 1) >= m.steps.length) ? (
+                              <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+                                <span className="font-semibold">Final answer:</span>{" "}
+                                <MathText text={normalizeTutorText(m.finalAnswer)} mjReady={mathJaxReady} className="inline" />
+                              </div>
+                            ) : null}
                           </div>
                         )}
 
