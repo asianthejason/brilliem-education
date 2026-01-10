@@ -1,8 +1,13 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /*
+    Brilliem base theme
+    - Keep visuals consistent across devices (do NOT follow OS theme).
+    - Provide a soft, modern backdrop for pages that don't set an explicit background.
+  */
+  --background: #f8fafc; /* slate-50 */
+  --foreground: #0f172a; /* slate-900 */
 }
 
 @theme inline {
@@ -12,15 +17,29 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/*
+  Force a uniform look across devices (including scrollbars/form controls)
+  by opting into LIGHT color-scheme regardless of OS theme.
+*/
+html {
+  color-scheme: light;
+  background: var(--background);
 }
 
 body {
-  background: var(--background);
+  min-height: 100vh;
+  background: transparent;
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+    Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+/* Subtle fixed backdrop for pages like /dashboard that don't specify a background */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(1200px circle at 50% -240px, rgba(255, 255, 255, 1), rgba(248, 250, 252, 1) 38%, rgba(238, 242, 255, 1) 100%);
 }

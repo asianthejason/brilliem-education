@@ -31,7 +31,11 @@ export default function RootLayout({
   return (
     <ClerkProvider afterSignInUrl="/dashboard" afterSignUpUrl="/dashboard">
       <html lang="en">
-        <body className="min-h-screen bg-white text-slate-900 antialiased">
+        {/*
+          NOTE: The global backdrop is controlled in app/globals.css so the UI
+          looks identical on devices with different OS theme settings.
+        */}
+        <body className="min-h-screen bg-transparent text-slate-900 antialiased selection:bg-slate-900 selection:text-white">
           <SiteHeader />
           {children}
 
