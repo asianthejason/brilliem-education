@@ -17,13 +17,11 @@ type ChatMsg =
       role: "assistant";
       text: string;
       steps?: string[];
-      finalAnswer?: string;
       lessons?: LessonRec[];
       stepRevealCount?: number;
     };
 
 type ApiResult = {
-  finalAnswer: string;
   steps?: string[];
   lessons?: LessonRec[];
   displayText?: string;
@@ -244,7 +242,6 @@ function normalizeLoadedChats(raw: any): ChatSession[] | null {
             ...m,
             text: normalizeTutorText(String(m.text || "")),
             steps: stepsArr,
-            finalAnswer: m.finalAnswer ? normalizeTutorText(String(m.finalAnswer)) : undefined,
             stepRevealCount,
           };
         }
@@ -456,7 +453,6 @@ function maybeSetChatTitleFromFirstUserMessage(userText: string) {
         }
         const parts: string[] = [];
         if (m.steps?.length) parts.push(m.steps.map((s, i) => `${i + 1}. ${stripDelimsForHistory(s)}`).join("\n"));
-        if (m.finalAnswer) parts.push(`Final answer: ${stripDelimsForHistory(m.finalAnswer)}`);
         const c = parts.join("\n").trim();
         return c ? { role: "assistant" as const, content: c } : null;
       })
@@ -522,7 +518,7 @@ function maybeSetChatTitleFromFirstUserMessage(userText: string) {
       }
 
       const r = data.result;
-      const steps = (r.steps && r.steps.length ? r.steps : r.finalAnswer ? [r.finalAnswer] : []).map((s) => normalizeTutorText(String(s)));
+      const steps = (r.steps && r.steps.length ? r.steps : []).map((s) => normalizeTutorText(String(s)));
 
       updateActiveChatMessages((prev) => [
         ...prev,
@@ -531,7 +527,6 @@ function maybeSetChatTitleFromFirstUserMessage(userText: string) {
           role: "assistant",
           text: normalizeTutorText(r.displayText || "Step-by-step solution:"),
           steps,
-          finalAnswer: normalizeTutorText(r.finalAnswer || ""),
           lessons: r.lessons,
           stepRevealCount: steps.length ? 1 : undefined, // reveal 1 step at a time
         },
@@ -686,14 +681,6 @@ function maybeSetChatTitleFromFirstUserMessage(userText: string) {
                                 </button>
                               </div>
                             )}
-
-
-                            {m.finalAnswer && (!m.steps || m.steps.length === 0 || (m.stepRevealCount ?? 1) >= m.steps.length) ? (
-                              <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
-                                <span className="font-semibold">Final answer:</span>{" "}
-                                <MathText text={normalizeTutorText(m.finalAnswer)} mjReady={mathJaxReady} className="inline" />
-                              </div>
-                            ) : null}
                           </div>
                         )}
 

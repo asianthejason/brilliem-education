@@ -17,7 +17,6 @@ type Body = {
 type ApiOk = {
   ok: true;
   result: {
-    finalAnswer: string;
     steps?: string[];
     lessons?: Lesson[];
     displayText?: string;
@@ -39,154 +38,6 @@ function safeString(v: unknown, max = 8000): string {
 
 function normalizeForCompare(s: string): string {
   return s.toLowerCase().replace(/\s+/g, "").replace(/[\u2018\u2019\u201C\u201D]/g, "");
-}
-
-function looksLikeNumericOrMathAnswer(rawWithTex: string): boolean {
-  const raw = String(rawWithTex || "").trim();
-  if (!raw) return false;
-
-  // Any explicit TeX/math delimiter strongly suggests this is quantitative.
-  if (/\\\(|\\\[|\\frac\{|\\sqrt\{|\\times\b|\\div\b|\\cdot\b|\\sum\b|\\int\b/.test(raw)) return true;
-
-  const plain = stripMathDelimsAndTex(raw);
-  if (!plain) return false;
-
-  // If it contains operators alongside digits, it's almost certainly math.
-  if (/\d/.test(plain) && /[=<>+*/^]/.test(plain)) return true;
-
-  // Plain numeric (optionally with unit).
-  if (/^-?\d+(?:\.\d+)?(?:\s*[a-zA-Z°/%]+(?:\/[a-zA-Z°]+)?)?$/.test(plain)) return true;
-  if (/^\d+\s*\/\s*\d+(?:\s*[a-zA-Z°/%]+(?:\/[a-zA-Z°]+)?)?$/.test(plain)) return true;
-
-  return false;
-}
-
-function deriveFinalAnswerFromSteps(steps: string[]): string {
-  const cleaned = (Array.isArray(steps) ? steps : [])
-    .map((s) => safeString(s, 4000))
-    .map((s) => s.replace(/^\s*(?:\d+[\).:\-]\s*)/, "").trim())
-    .filter(Boolean);
-
-  if (!cleaned.length) return "";
-
-  const phraseRes: RegExp[] = [
-    /\bfinal\s+(?:answer|result)\s*(?:is|:|-)?\s*/i,
-    /\bfinal\s+answer\s*[:\-]\s*/i,
-    /\banswer\s*[:\-]\s*/i,
-    /\bstate\s+the\s+final\s+answer\s*(?:is|:|-)?\s*/i,
-    /\btherefore\b[, ]*\s*(?:the\s+)?(?:final\s+)?(?:answer|result)\s*(?:is|:|-)?\s*/i,
-    /\bso\b[, ]*\s*(?:the\s+)?(?:final\s+)?(?:answer|result)\s*(?:is|:|-)?\s*/i,
-    /\bthe\s+(?:final\s+)?result\s*(?:is|:|-)?\s*/i,
-    /\bthe\s+(?:final\s+)?answer\s*(?:is|:|-)?\s*/i,
-    /\bwrite\s+(?:the\s+)?(?:sum|result|answer)\s+as\s*/i,
-    /\bthe\s+sum\s+is\s*/i,
-  ];
-
-  const pickMathFromSegment = (segRaw: string, preferFirst: boolean): string => {
-    if (!segRaw) return "";
-    const seg = segRaw.trim();
-
-    // If the answer is a named identifier (common in science/chemistry), preserve it.
-    // Examples: "RDS-1", "H2SO4", "NaCl".
-    const idMatches = [...seg.matchAll(/\b([A-Za-z]{1,6}\d{0,3}(?:-[A-Za-z0-9]{1,6})+)\b/g)];
-    if (idMatches.length) {
-      const chosen = idMatches[preferFirst ? 0 : idMatches.length - 1]![1];
-      return chosen.replace(/^"|"$/g, "");
-    }
-
-    // If we have a mixed number like "10 \( \frac{5}{6} \)" capture it as one math expression.
-    const mixedWrapped = seg.match(/\b(\d+)\s*\\\(\s*(\\frac\{[^{}]+\}\{[^{}]+\})\s*\\\)/);
-    if (mixedWrapped) {
-      const whole = mixedWrapped[1];
-      const frac = mixedWrapped[2];
-      return `\\(${whole} ${frac}\\)`;
-    }
-
-    // 1) MathJax-delimited expressions.
-    const mathMatches = [...seg.matchAll(/\\\(([\s\S]*?)\\\)|\\\[(\s*[\s\S]*?\s*)\\\]/g)];
-    if (mathMatches.length) {
-      const lower = seg.toLowerCase();
-      const alsoIdx = lower.search(/\b(?:also|alternatively)\b/);
-
-      const candidates = mathMatches
-        .map((m) => ({ full: m[0], idx: m.index ?? 0 }))
-        .sort((a, b) => a.idx - b.idx);
-
-      // If the sentence has "also ...", prefer the expression before "also"
-      if (alsoIdx >= 0) {
-        const before = candidates.filter((c) => c.idx < alsoIdx);
-        if (before.length) return preferFirst ? before[0].full : before[before.length - 1].full;
-      }
-
-      return preferFirst ? candidates[0].full : candidates[candidates.length - 1].full;
-    }
-
-    // 2) TeX \frac{a}{b}
-    const fracMatches = [...seg.matchAll(/\\frac\{[^{}]+\}\{[^{}]+\}/g)];
-    if (fracMatches.length) {
-      const frac = fracMatches[preferFirst ? 0 : fracMatches.length - 1]![0];
-      // Capture mixed number like "10 \frac{5}{6}" if present just before
-      const before = seg.slice(0, fracMatches[preferFirst ? 0 : fracMatches.length - 1]!.index ?? 0);
-      const whole = before.match(/\b(\d+)\s*$/);
-      if (whole) return `\\(${whole[1]} ${frac}\\)`;
-      return `\\(${frac}\\)`;
-    }
-
-    // 3) Simple numeric fraction like 41/28
-    const slashFracMatches = [...seg.matchAll(/\b(\d+)\s*\/\s*(\d+)\b/g)];
-    if (slashFracMatches.length) {
-      const m = slashFracMatches[preferFirst ? 0 : slashFracMatches.length - 1]!;
-      const a = m[1];
-      const b = m[2];
-      const before = seg.slice(0, m.index ?? 0);
-      const whole = before.match(/\b(\d+)\s*$/);
-      if (whole) return `\\(${whole[1]} \\frac{${a}}{${b}}\\)`;
-      return `\\(\\frac{${a}}{${b}}\\)`;
-    }
-
-    // 4) Last number (integer/decimal) with optional unit
-    const numMatches = [...seg.matchAll(/(-?\d+(?:\.\d+)?)(?:\s*([a-zA-Z°/%]+(?:\/[a-zA-Z°]+)?)\b)?/g)];
-    if (numMatches.length) {
-      const chosen = numMatches[preferFirst ? 0 : numMatches.length - 1]!;
-      const n = chosen[1];
-      const unit = chosen[2];
-      return (n + (unit ? ` ${unit}` : "")).trim();
-    }
-
-    return "";
-  };
-
-  const extractFromText = (s: string): string => {
-    if (!s) return "";
-
-    // If there's an '=', prefer whatever is after the last '='.
-    const rhs = (() => {
-      const idx = s.lastIndexOf("=");
-      if (idx !== -1 && idx < s.length - 1) return s.slice(idx + 1).trim();
-      return s;
-    })();
-
-    // Phrase-based: use the first expression after the phrase (avoids grabbing "... can also be written as ...")
-    for (const re of phraseRes) {
-      const m = re.exec(s);
-      if (m && typeof m.index === "number") {
-        const after = s.slice(m.index + m[0].length);
-        const picked = pickMathFromSegment(after, true);
-        if (picked) return picked;
-      }
-    }
-
-    // Otherwise pick from RHS. Use also/alternatively heuristic to avoid grabbing the alternative.
-    return pickMathFromSegment(rhs, false);
-  };
-
-  // Walk backwards to find the best "final/result/answer" phrasing; fall back to the last step.
-  for (let i = cleaned.length - 1; i >= 0; i--) {
-    const cand = extractFromText(cleaned[i]);
-    if (cand) return cand;
-  }
-
-  return extractFromText(cleaned[cleaned.length - 1]);
 }
 
 function looksLikeMathExpr(s: string): boolean {
@@ -283,6 +134,41 @@ function normalizeTutorOutput(text: string): string {
   return out.trim();
 }
 
+
+function cleanStepsForDisplay(steps: string[]): string[] {
+  const raw = Array.isArray(steps) ? steps : [];
+  const cleaned = raw
+    .map((s) => normalizeTutorOutput(safeString(s, 1200)))
+    // Remove any leading numbering the model might include (UI already numbers steps)
+    .map((s) => s.replace(/^\s*\d+[\).:\-]\s*/, "").trim())
+    // Remove any "Final answer:" label, if the model includes it
+    .map((s) => s.replace(/^\s*final\s+(?:answer|result)\s*[:\-]\s*/i, "").trim())
+    .filter(Boolean);
+
+  // If the model produced a redundant trailing answer-only step, drop it when it's already contained in the previous step.
+  if (cleaned.length >= 2) {
+    const last = cleaned[cleaned.length - 1]!;
+    const prev = cleaned[cleaned.length - 2]!;
+    const lastPlain = normalizeForCompare(stripMathDelimsAndTex(last));
+    const prevPlain = normalizeForCompare(stripMathDelimsAndTex(prev));
+
+    if (lastPlain && prevPlain && (prevPlain === lastPlain || prevPlain.includes(lastPlain))) {
+      cleaned.pop();
+    }
+  }
+
+  // Remove consecutive duplicates after normalization
+  const out: string[] = [];
+  let prevPlain = "";
+  for (const s of cleaned) {
+    const p = normalizeForCompare(stripMathDelimsAndTex(s));
+    if (p && p === prevPlain) continue;
+    out.push(s);
+    prevPlain = p;
+  }
+  return out;
+}
+
 function stripMathDelimsAndTex(s: string): string {
   let out = s || "";
   // Remove MathJax delimiters
@@ -307,14 +193,6 @@ function stripMathDelimsAndTex(s: string): string {
   out = out.replace(/[{}]/g, "");
   out = out.replace(/\s+/g, " ").trim();
   return out;
-}
-
-function dedupeTrailingUnits(s: string): string {
-  const t = s.trim();
-  // e.g. "54 km/h km/h" -> "54 km/h"
-  const m = t.match(/^(.+?)\b([a-zA-Z°/%]+(?:\/[a-zA-Z°]+)?)\s+\2\s*$/);
-  if (m) return `${m[1].trim()} ${m[2]}`.trim();
-  return t;
 }
 
 function firstLine(s: string): string {
@@ -443,7 +321,11 @@ export async function POST(req: Request) {
 ` +
       `- The LAST step must compute/declare the final result.
 ` +
-      `- final_answer MUST match the result in the last step (including units).
+      `- Do NOT add an extra "Final answer" line/step.
+` +
+      `- Do NOT label any step with "Final answer:" (just state the result naturally).
+` +
+      `- If there are multiple valid answers/solutions, include ALL of them in the last step.
 ` +
       `- Double-check arithmetic and units before finalizing.
 ` +
@@ -471,7 +353,6 @@ export async function POST(req: Request) {
         allowed: { type: "boolean" },
         subject: { type: "string", enum: ["math", "science", "other"] },
         refusal_message: { type: "string" },
-        final_answer: { type: "string" },
         steps: { type: "array", items: { type: "string" } },
         // MUST be indices into lessonCandidates (1-based), and can be empty.
         relevant_lesson_indices: {
@@ -483,7 +364,7 @@ export async function POST(req: Request) {
           },
         },
       },
-      required: ["allowed", "subject", "refusal_message", "final_answer", "steps", "relevant_lesson_indices"],
+      required: ["allowed", "subject", "refusal_message", "steps", "relevant_lesson_indices"],
     };
 
     const messages: any[] = [{ role: "system", content: systemPrompt }];
@@ -528,28 +409,13 @@ export async function POST(req: Request) {
       return jsonErr(msg, 200, true); // 200 so UI shows message inline without generic error
     }
 
-    let finalAnswer = normalizeTutorOutput(safeString(out?.final_answer, 4000)) || "I couldn't generate a solution for that one—try rephrasing the question.";
-    let steps = Array.isArray(out?.steps) ? out.steps.map((s: unknown) => normalizeTutorOutput(safeString(s, 900))).filter(Boolean) : [];
+    const noStepsMsg = "I couldn't generate a step-by-step solution for that one—try rephrasing the question.";
+    const steps: string[] = Array.isArray(out?.steps)
+      ? out.steps.map((s: unknown) => safeString(s, 900)).filter(Boolean)
+      : [];
 
-    // If the model's final_answer drifts from the computed result in the last step, trust the last step.
-    // IMPORTANT: Only auto-override when the answer is clearly quantitative.
-    // Otherwise, science/history identifiers like "RDS-1" can be incorrectly reduced to "-1".
-    const derived = deriveFinalAnswerFromSteps(steps);
-    if (derived) {
-      const aPlain = normalizeForCompare(stripMathDelimsAndTex(finalAnswer));
-      const dPlain = normalizeForCompare(stripMathDelimsAndTex(derived));
+    if (!steps.length) return jsonErr(noStepsMsg, 200);
 
-      const finalIsQuant = looksLikeNumericOrMathAnswer(finalAnswer);
-      const derivedIsQuant = looksLikeNumericOrMathAnswer(derived);
-
-      const shouldOverride =
-        !aPlain ||
-        (subject === "math" && dPlain && aPlain !== dPlain) ||
-        (subject === "science" && finalIsQuant && derivedIsQuant && dPlain && aPlain !== dPlain);
-
-      if (shouldOverride) finalAnswer = normalizeTutorOutput(derived);
-    }
-    finalAnswer = dedupeTrailingUnits(finalAnswer);
 
     // Map lesson indices -> lessons
     const indices: number[] = Array.isArray(out?.relevant_lesson_indices)
@@ -560,19 +426,9 @@ export async function POST(req: Request) {
       .filter(Boolean)
       .slice(0, 4);
 
-    const stepsOut = (steps && steps.length ? [...steps] : []) as string[];
-
-    // Ensure the last step contains the final answer so the UI can be steps-only.
-    if (finalAnswer) {
-      const finalPlain = normalizeForCompare(stripMathDelimsAndTex(finalAnswer));
-      const alreadyHasFinal = stepsOut.some(
-        (s) => /final answer\s*:/i.test(s) || normalizeForCompare(stripMathDelimsAndTex(s)) === finalPlain
-      );
-      if (!alreadyHasFinal) stepsOut.push(`Final answer: ${finalAnswer}`);
-    }
+    const stepsOut = cleanStepsForDisplay(steps);
 
     const result: ApiOk["result"] = {
-      finalAnswer,
       subject,
       lessons,
       displayText: "",
