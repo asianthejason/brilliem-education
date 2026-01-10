@@ -17,11 +17,13 @@ type ChatMsg =
       role: "assistant";
       text: string;
       steps?: string[];
+      finalAnswer?: string;
       lessons?: LessonRec[];
       stepRevealCount?: number;
     };
 
 type ApiResult = {
+  finalAnswer: string;
   steps?: string[];
   lessons?: LessonRec[];
   displayText?: string;
@@ -221,10 +223,29 @@ function normalizeLoadedChats(raw: any): ChatSession[] | null {
       const normalizedMessages: ChatMsg[] = messages.map((m: any) => {
         if (!m || typeof m !== "object") return null;
         if (m.role === "assistant") {
+          const stepsArr = Array.isArray(m.steps)
+            ? m.steps
+                .map((s: any) => normalizeTutorText(String(s || "")))
+                .filter(Boolean)
+            : undefined;
+
+          // Restore the "one step at a time" UX even for older chats stored in localStorage.
+          // If a previous version saved all steps revealed (stepRevealCount >= steps length),
+          // we reset it back to 1 so students can progress step-by-step again.
+          const rawReveal = Number((m as any).stepRevealCount);
+          const stepRevealCount =
+            stepsArr && stepsArr.length
+              ? Number.isFinite(rawReveal) && rawReveal >= 1 && rawReveal < stepsArr.length
+                ? rawReveal
+                : 1
+              : undefined;
+
           return {
             ...m,
             text: normalizeTutorText(String(m.text || "")),
-            steps: Array.isArray(m.steps) ? m.steps.map((s: any) => normalizeTutorText(String(s || ""))).filter(Boolean) : undefined,
+            steps: stepsArr,
+            finalAnswer: m.finalAnswer ? normalizeTutorText(String(m.finalAnswer)) : undefined,
+            stepRevealCount,
           };
         }
         if (m.role === "user") {
@@ -435,6 +456,7 @@ function maybeSetChatTitleFromFirstUserMessage(userText: string) {
         }
         const parts: string[] = [];
         if (m.steps?.length) parts.push(m.steps.map((s, i) => `${i + 1}. ${stripDelimsForHistory(s)}`).join("\n"));
+        if (m.finalAnswer) parts.push(`Final answer: ${stripDelimsForHistory(m.finalAnswer)}`);
         const c = parts.join("\n").trim();
         return c ? { role: "assistant" as const, content: c } : null;
       })
@@ -500,7 +522,7 @@ function maybeSetChatTitleFromFirstUserMessage(userText: string) {
       }
 
       const r = data.result;
-      const steps = (Array.isArray(r.steps) ? r.steps : []).map((s) => normalizeTutorText(String(s)).replace(/^\s*(Final\s*answer|Answer)\s*:\s*/i, "").trim()).filter(Boolean);
+      const steps = (r.steps && r.steps.length ? r.steps : r.finalAnswer ? [r.finalAnswer] : []).map((s) => normalizeTutorText(String(s)));
 
       updateActiveChatMessages((prev) => [
         ...prev,
@@ -509,6 +531,7 @@ function maybeSetChatTitleFromFirstUserMessage(userText: string) {
           role: "assistant",
           text: normalizeTutorText(r.displayText || "Step-by-step solution:"),
           steps,
+          finalAnswer: normalizeTutorText(r.finalAnswer || ""),
           lessons: r.lessons,
           stepRevealCount: steps.length ? 1 : undefined, // reveal 1 step at a time
         },
@@ -659,12 +682,18 @@ function maybeSetChatTitleFromFirstUserMessage(userText: string) {
                                   onClick={() => revealAllSteps(m.id)}
                                   className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-semibold text-slate-900 hover:bg-slate-50"
                                 >
-                                  Show all
+                                  Show rest
                                 </button>
                               </div>
                             )}
 
 
+                            {m.finalAnswer && (!m.steps || m.steps.length === 0 || (m.stepRevealCount ?? 1) >= m.steps.length) ? (
+                              <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+                                <span className="font-semibold">Final answer:</span>{" "}
+                                <MathText text={normalizeTutorText(m.finalAnswer)} mjReady={mathJaxReady} className="inline" />
+                              </div>
+                            ) : null}
                           </div>
                         )}
 

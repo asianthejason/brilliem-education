@@ -17,12 +17,12 @@ type Body = {
 type ApiOk = {
   ok: true;
   result: {
-    steps: string[];
+    finalAnswer: string;
+    steps?: string[];
     lessons?: Lesson[];
     displayText?: string;
     subject?: "math" | "science";
   };
-};
 };
 
 type ApiErr = { ok: false; message: string; refusal?: boolean };
@@ -261,6 +261,12 @@ function normalizeTutorOutput(text: string): string {
   if (!text) return "";
   let out = restoreJsonEscapedLatex(String(text));
 
+  // Strip control characters that can appear when backslashes are not escaped correctly in JSON
+  // (e.g. "\times" -> tab + "imes"). Keep newlines, but remove other non-printing chars.
+  out = out.replace(/\u00ad/g, ""); // soft hyphen
+  out = out.replace(/\t/g, " ");
+  out = out.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+
   // Convert $$...$$ to \[...\], $...$ to \( ... \) (only if it really looks like math)
   out = out.replace(/\$\$([\s\S]*?)\$\$/g, (m, inner) => (looksLikeMathExpr(inner) ? `\\[${inner}\\]` : inner));
   out = out.replace(/\$([^\n$]{1,300}?)\$/g, (m, inner) => (looksLikeMathExpr(inner) ? `\\(${inner}\\)` : inner));
@@ -437,7 +443,7 @@ export async function POST(req: Request) {
 ` +
       `- The LAST step must compute/declare the final result.
 ` +
-      `- Do NOT add a separate "Final answer:" label. The last step should plainly state the final result (include all solutions if multiple).
+      `- final_answer MUST match the result in the last step (including units).
 ` +
       `- Double-check arithmetic and units before finalizing.
 ` +
@@ -465,6 +471,7 @@ export async function POST(req: Request) {
         allowed: { type: "boolean" },
         subject: { type: "string", enum: ["math", "science", "other"] },
         refusal_message: { type: "string" },
+        final_answer: { type: "string" },
         steps: { type: "array", items: { type: "string" } },
         // MUST be indices into lessonCandidates (1-based), and can be empty.
         relevant_lesson_indices: {
@@ -476,7 +483,7 @@ export async function POST(req: Request) {
           },
         },
       },
-      required: ["allowed", "subject", "refusal_message", "steps", "relevant_lesson_indices"],
+      required: ["allowed", "subject", "refusal_message", "final_answer", "steps", "relevant_lesson_indices"],
     };
 
     const messages: any[] = [{ role: "system", content: systemPrompt }];
@@ -521,23 +528,29 @@ export async function POST(req: Request) {
       return jsonErr(msg, 200, true); // 200 so UI shows message inline without generic error
     }
 
-    let steps: string[] = Array.isArray(out?.steps)
-      ? out.steps
-          .map((s: unknown) => normalizeTutorOutput(safeString(s, 900)))
-          .filter(Boolean)
-      : [];
+    let finalAnswer = normalizeTutorOutput(safeString(out?.final_answer, 4000)) || "I couldn't generate a solution for that one—try rephrasing the question.";
+    let steps = Array.isArray(out?.steps) ? out.steps.map((s: unknown) => normalizeTutorOutput(safeString(s, 900))).filter(Boolean) : [];
 
-    // Safety net: if the model includes a label like "Final answer:", strip it—
-    // the final step itself should simply state the result.
-    steps = steps
-      .map((s: string) => String(s).replace(/^\s*(Final\s*answer|Answer)\s*:\s*/i, "").trim())
-      .filter(Boolean);
+    // If the model's final_answer drifts from the computed result in the last step, trust the last step.
+    // IMPORTANT: Only auto-override when the answer is clearly quantitative.
+    // Otherwise, science/history identifiers like "RDS-1" can be incorrectly reduced to "-1".
+    const derived = deriveFinalAnswerFromSteps(steps);
+    if (derived) {
+      const aPlain = normalizeForCompare(stripMathDelimsAndTex(finalAnswer));
+      const dPlain = normalizeForCompare(stripMathDelimsAndTex(derived));
 
-    // If the model fails to return steps, fall back to any answer text.
-    if (!steps.length) {
-      const fallback = normalizeTutorOutput(safeString((out as any)?.final_answer, 4000));
-      steps = fallback ? [fallback] : ["I couldn't generate a solution for that—try rephrasing the question."];
+      const finalIsQuant = looksLikeNumericOrMathAnswer(finalAnswer);
+      const derivedIsQuant = looksLikeNumericOrMathAnswer(derived);
+
+      const shouldOverride =
+        !aPlain ||
+        (subject === "math" && dPlain && aPlain !== dPlain) ||
+        (subject === "science" && finalIsQuant && derivedIsQuant && dPlain && aPlain !== dPlain);
+
+      if (shouldOverride) finalAnswer = normalizeTutorOutput(derived);
     }
+    finalAnswer = dedupeTrailingUnits(finalAnswer);
+
     // Map lesson indices -> lessons
     const indices: number[] = Array.isArray(out?.relevant_lesson_indices)
       ? out.relevant_lesson_indices.map((n: unknown) => Number(n)).filter((n: number) => Number.isFinite(n))
@@ -547,11 +560,23 @@ export async function POST(req: Request) {
       .filter(Boolean)
       .slice(0, 4);
 
+    const stepsOut = (steps && steps.length ? [...steps] : []) as string[];
+
+    // Ensure the last step contains the final answer so the UI can be steps-only.
+    if (finalAnswer) {
+      const finalPlain = normalizeForCompare(stripMathDelimsAndTex(finalAnswer));
+      const alreadyHasFinal = stepsOut.some(
+        (s) => /final answer\s*:/i.test(s) || normalizeForCompare(stripMathDelimsAndTex(s)) === finalPlain
+      );
+      if (!alreadyHasFinal) stepsOut.push(`Final answer: ${finalAnswer}`);
+    }
+
     const result: ApiOk["result"] = {
+      finalAnswer,
       subject,
       lessons,
-      displayText: "Step-by-step solution",
-      steps,
+      displayText: "",
+      steps: stepsOut,
     };
 
     const payload: ApiOk = { ok: true, result };
