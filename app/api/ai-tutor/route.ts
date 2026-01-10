@@ -69,82 +69,89 @@ function deriveFinalAnswerFromSteps(steps: string[]): string {
 
   if (!cleaned.length) return "";
 
-  const findChemEquation = (s: string): string => {
-    const m = s.match(
-      /(?:\b\d+\s*)?(?:[A-Z][a-z]?\d*)+(?:\s*\+\s*(?:\d+\s*)?(?:[A-Z][a-z]?\d*)+)*\s*(?:->|→)\s*(?:\d+\s*)?(?:[A-Z][a-z]?\d*)+(?:\s*\+\s*(?:\d+\s*)?(?:[A-Z][a-z]?\d*)+)*/
-    );
-    return m ? m[0].trim() : "";
-  };
-
-  const findMultiSolutions = (s: string): string => {
-    const m = s.match(/\b([a-zA-Z])\s*=\s*-?\d+(?:\.\d+)?(?:\s*(?:,|and|or)\s*\1?\s*=\s*-?\d+(?:\.\d+)?)+/);
-    return m ? m[0].trim() : "";
-  };
-
-  const findSciNotation = (s: string): string => {
-    const m = s.match(/\b(\d+(?:\.\d+)?)\s*(?:×|x|\*)\s*10\s*\^\s*\{?\s*([+-]?\d+)\s*\}?\b/i);
-    if (!m) return "";
-    const a = m[1];
-    const e = m[2];
-    const after = s.slice((m.index ?? 0) + m[0].length);
-    const unitMatch = after.match(/^\s*(?:\/\s*mol\b|mol\^?\s*-?\s*1\b|mol\s*-\s*1\b)/i);
-    const unit = unitMatch ? unitMatch[0].replace(/\s+/g, " ").trim() : "";
-    return unit ? `\\(${a} \\times 10^{${e}}\\) ${unit}` : `\\(${a} \\times 10^{${e}}\\)`;
-  };
-
   const phraseRes: RegExp[] = [
     /\bfinal\s+(?:answer|result)\s*(?:is|:|-)?\s*/i,
     /\bfinal\s+answer\s*[:\-]\s*/i,
     /\banswer\s*[:\-]\s*/i,
+    /\bstate\s+the\s+final\s+answer\s*(?:is|:|-)?\s*/i,
     /\btherefore\b[, ]*\s*(?:the\s+)?(?:final\s+)?(?:answer|result)\s*(?:is|:|-)?\s*/i,
     /\bso\b[, ]*\s*(?:the\s+)?(?:final\s+)?(?:answer|result)\s*(?:is|:|-)?\s*/i,
-    /\bthe\s+(?:final\s+)?(?:answer|result)\s*(?:is|:|-)?\s*/i,
+    /\bthe\s+(?:final\s+)?result\s*(?:is|:|-)?\s*/i,
+    /\bthe\s+(?:final\s+)?answer\s*(?:is|:|-)?\s*/i,
+    /\bwrite\s+(?:the\s+)?(?:sum|result|answer)\s+as\s*/i,
+    /\bthe\s+sum\s+is\s*/i,
   ];
 
-  const pickFromAfterPhrase = (s: string): string => {
-    for (const re of phraseRes) {
-      const m = re.exec(s);
-      if (m && typeof m.index === "number") return s.slice(m.index + m[0].length).trim();
-    }
-    return "";
-  };
-
-  const pickMathFromSegment = (segRaw: string): string => {
+  const pickMathFromSegment = (segRaw: string, preferFirst: boolean): string => {
     if (!segRaw) return "";
     const seg = segRaw.trim();
 
-    const eq = findChemEquation(seg);
-    if (eq) return eq;
-
-    const multi = findMultiSolutions(seg);
-    if (multi) return multi;
-
-    const sci = findSciNotation(seg);
-    if (sci) return sci;
-
-    const mathMatches = [...seg.matchAll(/\\\(([\s\S]*?)\\\)|\\\[(\s*[\s\S]*?\s*)\\\]/g)];
-    if (mathMatches.length) return (mathMatches[mathMatches.length - 1]![0] || "").trim();
-
-    const fracMatches = [...seg.matchAll(/\\frac\{[^{}]+\}\{[^{}]+\}/g)];
-    if (fracMatches.length) return `\\(${fracMatches[fracMatches.length - 1]![0]}\\)`;
-
-    const slashFracMatches = [...seg.matchAll(/\b(\d+)\s*\/\s*(\d+)\b/g)];
-    if (slashFracMatches.length) {
-      const m = slashFracMatches[slashFracMatches.length - 1]!;
-      return `\\(\\frac{${m[1]}}{${m[2]}}\\)`;
+    // If the answer is a named identifier (common in science/chemistry), preserve it.
+    // Examples: "RDS-1", "H2SO4", "NaCl".
+    const idMatches = [...seg.matchAll(/\b([A-Za-z]{1,6}\d{0,3}(?:-[A-Za-z0-9]{1,6})+)\b/g)];
+    if (idMatches.length) {
+      const chosen = idMatches[preferFirst ? 0 : idMatches.length - 1]![1];
+      return chosen.replace(/^"|"$/g, "");
     }
 
-    // Last standalone number with optional unit (avoid digits inside words like NO3)
-    const numMatches = [...seg.matchAll(/\b(-?\d+(?:\.\d+)?)\b(?:\s*([a-zA-Z°/%]+(?:\/[a-zA-Z°]+)?)\b)?/g)];
+    // If we have a mixed number like "10 \( \frac{5}{6} \)" capture it as one math expression.
+    const mixedWrapped = seg.match(/\b(\d+)\s*\\\(\s*(\\frac\{[^{}]+\}\{[^{}]+\})\s*\\\)/);
+    if (mixedWrapped) {
+      const whole = mixedWrapped[1];
+      const frac = mixedWrapped[2];
+      return `\\(${whole} ${frac}\\)`;
+    }
+
+    // 1) MathJax-delimited expressions.
+    const mathMatches = [...seg.matchAll(/\\\(([\s\S]*?)\\\)|\\\[(\s*[\s\S]*?\s*)\\\]/g)];
+    if (mathMatches.length) {
+      const lower = seg.toLowerCase();
+      const alsoIdx = lower.search(/\b(?:also|alternatively)\b/);
+
+      const candidates = mathMatches
+        .map((m) => ({ full: m[0], idx: m.index ?? 0 }))
+        .sort((a, b) => a.idx - b.idx);
+
+      // If the sentence has "also ...", prefer the expression before "also"
+      if (alsoIdx >= 0) {
+        const before = candidates.filter((c) => c.idx < alsoIdx);
+        if (before.length) return preferFirst ? before[0].full : before[before.length - 1].full;
+      }
+
+      return preferFirst ? candidates[0].full : candidates[candidates.length - 1].full;
+    }
+
+    // 2) TeX \frac{a}{b}
+    const fracMatches = [...seg.matchAll(/\\frac\{[^{}]+\}\{[^{}]+\}/g)];
+    if (fracMatches.length) {
+      const frac = fracMatches[preferFirst ? 0 : fracMatches.length - 1]![0];
+      // Capture mixed number like "10 \frac{5}{6}" if present just before
+      const before = seg.slice(0, fracMatches[preferFirst ? 0 : fracMatches.length - 1]!.index ?? 0);
+      const whole = before.match(/\b(\d+)\s*$/);
+      if (whole) return `\\(${whole[1]} ${frac}\\)`;
+      return `\\(${frac}\\)`;
+    }
+
+    // 3) Simple numeric fraction like 41/28
+    const slashFracMatches = [...seg.matchAll(/\b(\d+)\s*\/\s*(\d+)\b/g)];
+    if (slashFracMatches.length) {
+      const m = slashFracMatches[preferFirst ? 0 : slashFracMatches.length - 1]!;
+      const a = m[1];
+      const b = m[2];
+      const before = seg.slice(0, m.index ?? 0);
+      const whole = before.match(/\b(\d+)\s*$/);
+      if (whole) return `\\(${whole[1]} \\frac{${a}}{${b}}\\)`;
+      return `\\(\\frac{${a}}{${b}}\\)`;
+    }
+
+    // 4) Last number (integer/decimal) with optional unit
+    const numMatches = [...seg.matchAll(/(-?\d+(?:\.\d+)?)(?:\s*([a-zA-Z°/%]+(?:\/[a-zA-Z°]+)?)\b)?/g)];
     if (numMatches.length) {
-      const chosen = numMatches[numMatches.length - 1]!;
+      const chosen = numMatches[preferFirst ? 0 : numMatches.length - 1]!;
       const n = chosen[1];
       const unit = chosen[2];
       return (n + (unit ? ` ${unit}` : "")).trim();
     }
-
-    // If it’s mostly words, return the tail (useful for "called the nitrate ion")
-    if (/[A-Za-z]/.test(seg) && !/\d/.test(seg)) return seg;
 
     return "";
   };
@@ -152,12 +159,28 @@ function deriveFinalAnswerFromSteps(steps: string[]): string {
   const extractFromText = (s: string): string => {
     if (!s) return "";
 
-    const afterPhrase = pickFromAfterPhrase(s);
-    if (afterPhrase) return pickMathFromSegment(afterPhrase);
+    // If there's an '=', prefer whatever is after the last '='.
+    const rhs = (() => {
+      const idx = s.lastIndexOf("=");
+      if (idx !== -1 && idx < s.length - 1) return s.slice(idx + 1).trim();
+      return s;
+    })();
 
-    return pickMathFromSegment(s);
+    // Phrase-based: use the first expression after the phrase (avoids grabbing "... can also be written as ...")
+    for (const re of phraseRes) {
+      const m = re.exec(s);
+      if (m && typeof m.index === "number") {
+        const after = s.slice(m.index + m[0].length);
+        const picked = pickMathFromSegment(after, true);
+        if (picked) return picked;
+      }
+    }
+
+    // Otherwise pick from RHS. Use also/alternatively heuristic to avoid grabbing the alternative.
+    return pickMathFromSegment(rhs, false);
   };
 
+  // Walk backwards to find the best "final/result/answer" phrasing; fall back to the last step.
   for (let i = cleaned.length - 1; i >= 0; i--) {
     const cand = extractFromText(cleaned[i]);
     if (cand) return cand;
@@ -208,120 +231,18 @@ function wrapBareTeXInPlainSegments(text: string): string {
   let last = 0;
   let m: RegExpExecArray | null;
 
-  const buildChemLatex = (tok: string): string => {
-    const raw = tok.trim();
-    if (!raw) return raw;
-
-    // Separate trailing charge like "^-" "2-" "+" "3+"
-    const chargeMatch = raw.match(/^(.*?)(?:\^)?(\d*)([+-])$/);
-    let base = raw;
-    let charge: string | null = null;
-    if (chargeMatch && chargeMatch[1]) {
-      base = chargeMatch[1];
-      const mag = chargeMatch[2] || "";
-      const sign = chargeMatch[3];
-      charge = `${mag}${sign}`;
-    }
-
-    // Parse element groups: Fe2O3 -> Fe_2O_3
-    const groups = [...base.matchAll(/([A-Z][a-z]?)(\d*)/g)];
-    if (!groups.length) return raw;
-
-    let built = groups
-      .map((g) => {
-        const el = g[1];
-        const num = g[2];
-        return num ? `${el}_${num}` : el;
-      })
-      .join("");
-
-    if (charge) built += `^{${charge}}`;
-
-    return `\\mathrm{${built}}`;
-  };
-
-  const wrapChemToken = (tok: string): string => `\\(${buildChemLatex(tok)}\\)`;
-
-  const formatChemicalEquation = (eqRaw: string): string => {
-    const eq = eqRaw.trim();
-
-    const tokens = eq
-      .replace(/→/g, "->")
-      .replace(/\s+/g, " ")
-      .split(" ")
-      .filter(Boolean);
-
-    const outTokens: string[] = [];
-    for (let i = 0; i < tokens.length; i++) {
-      const t = tokens[i];
-
-      if (t === "+") {
-        outTokens.push("+");
-        continue;
-      }
-      if (t === "->") {
-        outTokens.push("\\rightarrow");
-        continue;
-      }
-
-      const core = t.replace(/^[\(\[\{]+/, "").replace(/[\)\]\}\.,;:]+$/, "");
-
-      if (/^\d+$/.test(core)) {
-        outTokens.push(core);
-        continue;
-      }
-
-      if (/^[A-Za-z0-9]+(?:\^?\d*[+-])?$/.test(core) && /[A-Z]/.test(core)) {
-        const prev = outTokens[outTokens.length - 1];
-        if (prev && /^\d+$/.test(prev)) outTokens[outTokens.length - 1] = `${prev}\\,`;
-        outTokens.push(buildChemLatex(core));
-        continue;
-      }
-
-      outTokens.push(core);
-    }
-
-    return `\\(${outTokens.join(" ")}\\)`;
-  };
-
   const processPlain = (seg: string) => {
     let s = seg;
 
+    // Fix common lost-backslash TeX commands like "frac{...}{...}" or "sqrt{...}"
     s = s.replace(/(^|[^\\])frac\{/g, "$1\\frac{");
     s = s.replace(/(^|[^\\])sqrt\{/g, "$1\\sqrt{");
 
+    // Wrap bare \frac{a}{b} so it renders with a horizontal bar.
     s = s.replace(/\\frac\{[^{}]+\}\{[^{}]+\}/g, (f) => `\\(${f}\\)`);
 
+    // Wrap simple numeric fractions like 3/4 -> \(\frac{3}{4}\)
     s = s.replace(/\b(\d{1,4})\s*\/\s*(\d{1,4})\b/g, (_m, a, b) => `\\(\\frac{${a}}{${b}}\\)`);
-
-    // Scientific notation like 6.022 x 10^23 (or ×, *)
-    s = s.replace(
-      /\b(\d+(?:\.\d+)?)\s*(?:×|x|\*)\s*10\s*\^\s*\{?\s*([+-]?\d+)\s*\}?\b/gi,
-      (_m, a, e) => `\\(${a} \\times 10^{${e}}\\)`
-    );
-
-    // Chemistry equations like "4 Fe + 3 O2 -> 2 Fe2O3"
-    s = s.replace(
-      /(?:\b\d+\s*)?(?:[A-Z][a-z]?\d*)+(?:\s*\+\s*(?:\d+\s*)?(?:[A-Z][a-z]?\d*)+)*\s*(?:->|→)\s*(?:\d+\s*)?(?:[A-Z][a-z]?\d*)+(?:\s*\+\s*(?:\d+\s*)?(?:[A-Z][a-z]?\d*)+)*/g,
-      (eq) => formatChemicalEquation(eq)
-    );
-
-    // Standalone chemical tokens (avoid short acronyms like AI and astronomy labels like M31)
-    s = s.replace(/\b([A-Z][A-Za-z0-9]{1,12}(?:\^?\d*[+-])?)\b/g, (_m, tok) => {
-      const t = String(tok);
-
-      const hasCharge = /[+-]$/.test(t);
-      const hasLower = /[a-z]/.test(t);
-      const multiElement = (t.match(/[A-Z]/g) || []).length >= 2;
-
-      if (/^[A-Z]\d{1,3}$/.test(t)) return t; // M31, M87, etc.
-      if (/^[A-Z]{2,4}$/.test(t)) return t; // AI, DNA, etc.
-
-      if (!hasCharge && !/\d/.test(t) && !multiElement) return t;
-      if (!hasCharge && !hasLower && !multiElement) return t;
-
-      return wrapChemToken(t);
-    });
 
     return s;
   };
@@ -329,7 +250,7 @@ function wrapBareTeXInPlainSegments(text: string): string {
   while ((m = mathRe.exec(text))) {
     const start = m.index ?? 0;
     out += processPlain(text.slice(last, start));
-    out += m[0];
+    out += m[0]; // keep existing math blocks untouched
     last = start + m[0].length;
   }
   out += processPlain(text.slice(last));
@@ -339,6 +260,12 @@ function wrapBareTeXInPlainSegments(text: string): string {
 function normalizeTutorOutput(text: string): string {
   if (!text) return "";
   let out = restoreJsonEscapedLatex(String(text));
+
+  // Strip control characters that can appear when backslashes are not escaped correctly in JSON
+  // (e.g. "\times" -> tab + "imes"). Keep newlines, but remove other non-printing chars.
+  out = out.replace(/\u00ad/g, ""); // soft hyphen
+  out = out.replace(/\t/g, " ");
+  out = out.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
 
   // Convert $$...$$ to \[...\], $...$ to \( ... \) (only if it really looks like math)
   out = out.replace(/\$\$([\s\S]*?)\$\$/g, (m, inner) => (looksLikeMathExpr(inner) ? `\\[${inner}\\]` : inner));
@@ -528,9 +455,6 @@ export async function POST(req: Request) {
 - NEVER wrap normal words/sentences in math delimiters.
 - Do NOT use $...$ or $$...$$ delimiters.
 - For division/fractions, use \\frac{a}{b} inside a math delimiter so it renders with a horizontal fraction bar.
-- For scientific notation, use \(...\) with 10^{...}, e.g. "\(6.022 \times 10^{23}\)".
-- For chemistry formulas/equations, use MathJax with \mathrm and subscripts, e.g. "\(\mathrm{NO_3^-}\)" and "\(\mathrm{Fe_2O_3}\)".
-- For reaction arrows, use "\rightarrow" inside a math delimiter, e.g. "\(4\,\mathrm{Fe} + 3\,\mathrm{O_2} \rightarrow 2\,\mathrm{Fe_2O_3}\)".
 - Put units (km/h, m/s, N, kg, s) outside math delimiters whenever possible.
 ` +
       `- Do not put LaTeX inside code fences.
@@ -618,19 +542,10 @@ export async function POST(req: Request) {
       const finalIsQuant = looksLikeNumericOrMathAnswer(finalAnswer);
       const derivedIsQuant = looksLikeNumericOrMathAnswer(derived);
 
-      
-const derivedPlainRaw = stripMathDelimsAndTex(derived).trim();
-const derivedIsBareNumber = /^-?\d+(?:\.\d+)?$/.test(derivedPlainRaw);
-const finalHasLetters = /[A-Za-z]/.test(stripMathDelimsAndTex(finalAnswer));
-
-// Guard: don't replace a word-based final answer (e.g., "nitrate ion") with a stray bare number ("3")
-const guardAgainstBadOverride = finalHasLetters && derivedIsBareNumber;
-
-const shouldOverride =
-  !guardAgainstBadOverride &&
-  (!aPlain ||
-    (subject === "math" && dPlain && aPlain !== dPlain) ||
-    (subject === "science" && finalIsQuant && derivedIsQuant && dPlain && aPlain !== dPlain));
+      const shouldOverride =
+        !aPlain ||
+        (subject === "math" && dPlain && aPlain !== dPlain) ||
+        (subject === "science" && finalIsQuant && derivedIsQuant && dPlain && aPlain !== dPlain);
 
       if (shouldOverride) finalAnswer = normalizeTutorOutput(derived);
     }
@@ -645,13 +560,23 @@ const shouldOverride =
       .filter(Boolean)
       .slice(0, 4);
 
+    const stepsOut = (steps && steps.length ? [...steps] : []) as string[];
+
+    // Ensure the last step contains the final answer so the UI can be steps-only.
+    if (finalAnswer) {
+      const finalPlain = normalizeForCompare(stripMathDelimsAndTex(finalAnswer));
+      const alreadyHasFinal = stepsOut.some(
+        (s) => /final answer\s*:/i.test(s) || normalizeForCompare(stripMathDelimsAndTex(s)) === finalPlain
+      );
+      if (!alreadyHasFinal) stepsOut.push(`Final answer: ${finalAnswer}`);
+    }
+
     const result: ApiOk["result"] = {
       finalAnswer,
       subject,
       lessons,
-      // Don’t echo the numeric answer in the bubble header; the UI shows it after the steps.
-      displayText: "Step-by-step solution:",
-      steps: steps.length ? steps : [finalAnswer].filter(Boolean),
+      displayText: "",
+      steps: stepsOut,
     };
 
     const payload: ApiOk = { ok: true, result };
