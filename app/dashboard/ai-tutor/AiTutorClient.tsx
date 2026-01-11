@@ -274,6 +274,9 @@ export function AiTutorClient() {
   const [error, setError] = useState<string | null>(null);
   const [focusMode, setFocusMode] = useState(false);
 
+  const [dragActive, setDragActive] = useState(false);
+  const dragCounterRef = useRef(0);
+
   const [mathJaxReady, setMathJaxReady] = useState(false);
 
   // Next.js de-dupes <Script> tags by id/src across client navigations.
@@ -440,26 +443,68 @@ function maybeSetChatTitleFromFirstUserMessage(userText: string) {
     });
   }
 
-  async function onPickImage(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0];
-    if (!f) return;
-
-    if (!/^image\//.test(f.type)) {
-      setError("Please upload an image file.");
-      e.target.value = "";
-      return;
-    }
-
-    if (f.size > 2.5 * 1024 * 1024) {
-      setError("That image is a bit large. Please upload an image under ~2.5MB.");
-      e.target.value = "";
-      return;
-    }
-
-    setError(null);
-    const dataUrl = await fileToDataUrl(f);
-    setImageDataUrl(dataUrl);
+  async function attachImageFile(file: File) {
+  if (!/^image\//.test(file.type)) {
+    setError("Please upload an image file.");
+    return;
   }
+
+  if (file.size > 2.5 * 1024 * 1024) {
+    setError("That image is a bit large. Please upload an image under ~2.5MB.");
+    return;
+  }
+
+  setError(null);
+  const dataUrl = await fileToDataUrl(file);
+  setImageDataUrl(dataUrl);
+}
+
+async function onPickImage(e: React.ChangeEvent<HTMLInputElement>) {
+  const f = e.target.files?.[0];
+  if (!f) return;
+  await attachImageFile(f);
+  e.target.value = "";
+}
+
+function isFileDrag(e: React.DragEvent) {
+  const types = Array.from(e.dataTransfer?.types || []);
+  return types.includes("Files");
+}
+
+function onDragEnter(e: React.DragEvent) {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  dragCounterRef.current += 1;
+  setDragActive(true);
+}
+
+function onDragOver(e: React.DragEvent) {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "copy";
+}
+
+function onDragLeave(e: React.DragEvent) {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
+  if (dragCounterRef.current === 0) setDragActive(false);
+}
+
+async function onDrop(e: React.DragEvent) {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  dragCounterRef.current = 0;
+  setDragActive(false);
+
+  const files = Array.from(e.dataTransfer.files || []);
+  const img = files.find((f) => /^image\//.test(f.type));
+  if (!img) {
+    setError("Please drop an image file.");
+    return;
+  }
+  await attachImageFile(img);
+}
 
   function clearImage() {
     setImageDataUrl(null);
@@ -691,7 +736,16 @@ function maybeSetChatTitleFromFirstUserMessage(userText: string) {
           </aside>
 
           {/* Main chat */}
-          <main className="flex flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
+          <main className="relative flex flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-slate-50" onDragEnter={onDragEnter} onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
+{dragActive && (
+  <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-white/60 backdrop-blur-[1px]">
+    <div className="rounded-2xl border-2 border-dashed border-slate-400 bg-white px-6 py-4 text-center shadow-sm">
+      <div className="text-sm font-semibold text-slate-900">Drop image to attach</div>
+      <div className="mt-1 text-xs text-slate-600">It will be added to your next message.</div>
+    </div>
+  </div>
+)}
+
             {/* Messages scroller */}
             <div ref={scrollerRef} className="flex-1 overflow-y-auto p-3">
               <div className="grid gap-3">
