@@ -272,6 +272,7 @@ export function AiTutorClient() {
   const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [focusMode, setFocusMode] = useState(false);
 
   const [mathJaxReady, setMathJaxReady] = useState(false);
 
@@ -286,12 +287,33 @@ export function AiTutorClient() {
     }
   }, []);
 
+  // Focus mode makes the AI Tutor occupy the full viewport (ChatGPT-like).
+  // Lock background scroll + allow ESC to exit.
+  useEffect(() => {
+    if (!focusMode) return;
+
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFocusMode(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [focusMode]);
+
   const [chats, setChats] = useState<ChatSession[]>(() => [makeNewChat()]);
   const [activeChatId, setActiveChatId] = useState<string>("");
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const prevMsgCountRef = useRef<number>(0);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
 
   // Load chats from localStorage
   useEffect(() => {
@@ -405,6 +427,16 @@ function maybeSetChatTitleFromFirstUserMessage(userText: string) {
       }
       if (activeChatId === chatId) setActiveChatId(next[0].id);
       return next;
+    });
+  }
+
+  function toggleFocusMode() {
+    setFocusMode((prev) => !prev);
+    // Keep typing flow smooth after entering/exiting focus mode.
+    requestAnimationFrame(() => {
+      composerRef.current?.focus();
+      const el = scrollerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
     });
   }
 
@@ -541,6 +573,10 @@ function maybeSetChatTitleFromFirstUserMessage(userText: string) {
     }
   }
 
+  const shellClass = focusMode
+    ? "fixed inset-0 z-[100] w-screen h-screen rounded-none border-0 bg-white p-4 md:p-6 shadow-none flex flex-col overflow-hidden"
+    : "rounded-3xl border border-slate-200 bg-white p-6 shadow-sm flex flex-col h-[calc(100vh-220px)] overflow-hidden";
+
   return (
     <>
       <Script id="mathjax-config" strategy="beforeInteractive">{`
@@ -561,13 +597,40 @@ function maybeSetChatTitleFromFirstUserMessage(userText: string) {
         onLoad={() => setMathJaxReady(true)}
       />
 
-      <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm flex flex-col h-[calc(100vh-220px)] overflow-hidden">
+      <div ref={rootRef} className={shellClass}>
         {/* Header */}
-        <div>
-          <h1 className="text-xl font-bold text-slate-900">AI Tutor</h1>
-          <p className="mt-1 text-sm text-slate-600">
-            Math &amp; science homework help (<span className="italic">type a question or upload a photo</span>). If you ask something outside math/science, it will be rejected.
-          </p>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-bold text-slate-900">AI Tutor</h1>
+            <p className="mt-1 text-sm text-slate-600">
+              Math &amp; science homework help (<span className="italic">type a question or upload a photo</span>). If you ask something outside math/science, it will be rejected.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={toggleFocusMode}
+            className="shrink-0 inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-50"
+            title={focusMode ? "Exit full screen" : "Full screen"}
+            aria-label={focusMode ? "Exit full screen" : "Full screen"}
+          >
+            {focusMode ? (
+              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 3H5a2 2 0 0 0-2 2v4" />
+                <path d="M15 3h4a2 2 0 0 1 2 2v4" />
+                <path d="M9 21H5a2 2 0 0 1-2-2v-4" />
+                <path d="M15 21h4a2 2 0 0 0 2-2v-4" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+                <path d="M16 3h3a2 2 0 0 1 2 2v3" />
+                <path d="M8 21H5a2 2 0 0 1-2-2v-3" />
+                <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+              </svg>
+            )}
+            <span className="hidden sm:inline">{focusMode ? "Exit" : "Full screen"}</span>
+          </button>
         </div>
 
         {/* Body */}
@@ -764,6 +827,7 @@ function maybeSetChatTitleFromFirstUserMessage(userText: string) {
                   </button>
 
                   <textarea
+                    ref={composerRef}
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={onComposerKeyDown}
