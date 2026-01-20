@@ -1,5 +1,6 @@
 import { auth, clerkClient } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
+import { LessonsClient } from "./LessonsClient";
 
 type Tier = "none" | "free" | "lessons" | "lessons_ai";
 
@@ -33,6 +34,10 @@ export default async function LessonsPage() {
           <div className="mt-1">Your plan includes full access to all lessons.</div>
         </div>
       )}
+
+      <div className="mt-6">
+        <LessonsClient tier={tier} />
+      </div>
     </div>
   );
 }
