@@ -42,14 +42,6 @@ function pctFromAttempts(attempts: Attempt[]): number | null {
   return Math.round((correct / last.length) * 100);
 }
 
-function bankStatus(lessonId: string) {
-  const used = readJson<Record<string, string[]>>(STORAGE_USED_BANK, {});
-  const usedIds = new Set(used[lessonId] || []);
-  const bank = getBankForLesson(lessonId);
-  const remaining = bank.filter((q) => !usedIds.has(q.id)).length;
-  return { total: bank.length, remaining };
-}
-
 async function fetchAiQuestion(params: { lessonId: string; recentPrompts: string[] }) {
   const res = await fetch("/api/lesson-question", {
     method: "POST",
@@ -83,8 +75,16 @@ export function LessonsClient({ tier }: { tier: Tier }) {
   const [qError, setQError] = useState<string | null>(null);
   const [bankInfo, setBankInfo] = useState<{ total: number; remaining: number }>({ total: 0, remaining: 0 });
 
+  // Keep attempts in React state so sidebar scores update immediately after answering.
+  const [attemptsByLesson, setAttemptsByLesson] = useState<Record<string, Attempt[]>>({});
+
   const recentPromptsRef = useRef<string[]>([]);
   const lastAiCallAt = useRef<number>(0);
+
+  // Hydrate attempts once on mount (same-tab localStorage writes won't trigger a "storage" event).
+  useEffect(() => {
+    setAttemptsByLesson(readJson<Record<string, Attempt[]>>(STORAGE_ATTEMPTS, {}));
+  }, []);
 
   const selectedGradeObj = useMemo(() => grades.find((g) => g.grade === selectedGrade) || grade7, [grades, grade7, selectedGrade]);
   const selectedUnit = useMemo<UnitRef | null>(
@@ -190,14 +190,16 @@ export function LessonsClient({ tier }: { tier: Tier }) {
   }
 
   function recordAttempt(lessonId: string, correct: boolean) {
-    const all = readJson<Record<string, Attempt[]>>(STORAGE_ATTEMPTS, {});
-    const prev = all[lessonId] || [];
-    const next = [...prev, { correct, ts: Date.now() }].slice(-50);
-    const updated = { ...all, [lessonId]: next };
-    writeJson(STORAGE_ATTEMPTS, updated);
+    if (!lessonId) return;
+    const ts = Date.now();
+    setAttemptsByLesson((prev) => {
+      const prevArr = prev[lessonId] || [];
+      const nextArr = [...prevArr, { correct, ts }].slice(-50);
+      const updated = { ...prev, [lessonId]: nextArr };
+      writeJson(STORAGE_ATTEMPTS, updated);
+      return updated;
+    });
   }
-
-  const attemptsByLesson = useMemo(() => readJson<Record<string, Attempt[]>>(STORAGE_ATTEMPTS, {}), [selectedLessonId]);
 
   function scoreLabel(lessonId: string) {
     const pct = pctFromAttempts(attemptsByLesson[lessonId] || []);
