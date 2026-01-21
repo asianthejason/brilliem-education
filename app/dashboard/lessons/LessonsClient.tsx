@@ -44,14 +44,6 @@ function pctFromAttempts(attempts: Attempt[]): number | null {
   return Math.round((correct / 20) * 100);
 }
 
-function bankStatus(lessonId: string) {
-  const used = readJson<Record<string, string[]>>(STORAGE_USED_BANK, {});
-  const usedIds = new Set(used[lessonId] || []);
-  const bank = getBankForLesson(lessonId);
-  const remaining = bank.filter((q) => !usedIds.has(q.id)).length;
-  return { total: bank.length, remaining };
-}
-
 async function fetchAiQuestion(params: { lessonId: string; recentPrompts: string[] }) {
   const res = await fetch("/api/lesson-question", {
     method: "POST",
@@ -65,6 +57,17 @@ async function fetchAiQuestion(params: { lessonId: string; recentPrompts: string
   return json.question as Question;
 }
 
+function strandLabel(strand: string) {
+  // Your data currently uses singular names like "Number".
+  // Give them a slightly more modern nav label.
+  const s = strand.toLowerCase();
+  if (s === "number") return "Numbers";
+  if (s.includes("pattern")) return "Patterns & Relations";
+  if (s.includes("shape")) return "Shape & Space";
+  if (s.includes("stat")) return "Statistics & Probability";
+  return strand;
+}
+
 export function LessonsClient({ tier }: { tier: Tier }) {
   const grades = GRADES_7_TO_12;
 
@@ -73,10 +76,12 @@ export function LessonsClient({ tier }: { tier: Tier }) {
   const initialLesson = initialUnit?.lessons[0];
 
   const [selectedGrade, setSelectedGrade] = useState<number>(grade7.grade);
+  const [selectedStrand, setSelectedStrand] = useState<string>(initialUnit?.strand || "");
   const [selectedUnitId, setSelectedUnitId] = useState<string>(initialUnit?.id || "");
   const [selectedLessonId, setSelectedLessonId] = useState<string>(initialLesson?.id || "");
 
   const [activeTab, setActiveTab] = useState<"practice" | "unit_test">("practice");
+  const [sidebarQuery, setSidebarQuery] = useState<string>("");
 
   const [question, setQuestion] = useState<Question | null>(null);
   const [userInput, setUserInput] = useState<string>("");
@@ -85,28 +90,69 @@ export function LessonsClient({ tier }: { tier: Tier }) {
   const [qError, setQError] = useState<string | null>(null);
   const [bankInfo, setBankInfo] = useState<{ total: number; remaining: number }>({ total: 0, remaining: 0 });
 
+  // Attempts must be stateful so the sidebar score updates immediately.
+  const [attemptsByLesson, setAttemptsByLesson] = useState<Record<string, Attempt[]>>(() =>
+    readJson<Record<string, Attempt[]>>(STORAGE_ATTEMPTS, {})
+  );
+
   const recentPromptsRef = useRef<string[]>([]);
   const lastAiCallAt = useRef<number>(0);
 
-  const selectedGradeObj = useMemo(() => grades.find((g) => g.grade === selectedGrade) || grade7, [grades, grade7, selectedGrade]);
-  const selectedUnit = useMemo<UnitRef | null>(
-    () => selectedGradeObj.units.find((u) => u.id === selectedUnitId) || selectedGradeObj.units[0] || null,
-    [selectedGradeObj, selectedUnitId]
-  );
-  const selectedLesson = useMemo<LessonRef | null>(
-    () => selectedUnit?.lessons.find((l) => l.id === selectedLessonId) || selectedUnit?.lessons[0] || null,
-    [selectedUnit, selectedLessonId]
+  const selectedGradeObj = useMemo(
+    () => grades.find((g) => g.grade === selectedGrade) || grade7,
+    [grades, grade7, selectedGrade]
   );
 
-  // Keep selected IDs valid when grade changes.
+  const strands = useMemo(() => {
+    const map = new Map<string, UnitRef[]>();
+    for (const u of selectedGradeObj.units) {
+      map.set(u.strand, [...(map.get(u.strand) || []), u]);
+    }
+    return Array.from(map.entries()).map(([strand, units]) => ({ strand, units }));
+  }, [selectedGradeObj.units]);
+
+  const selectedUnit = useMemo<UnitRef | null>(() => {
+    return (
+      selectedGradeObj.units.find((u) => u.id === selectedUnitId) ||
+      selectedGradeObj.units[0] ||
+      null
+    );
+  }, [selectedGradeObj.units, selectedUnitId]);
+
+  const selectedLesson = useMemo<LessonRef | null>(() => {
+    return (
+      selectedUnit?.lessons.find((l) => l.id === selectedLessonId) ||
+      selectedUnit?.lessons[0] ||
+      null
+    );
+  }, [selectedUnit, selectedLessonId]);
+
+  // Keep selection valid when grade changes.
   useEffect(() => {
-    const g = selectedGradeObj;
-    const u = g.units.find((x) => x.id === selectedUnitId) || g.units[0];
-    const l = u?.lessons.find((x) => x.id === selectedLessonId) || u?.lessons[0];
-    if (u?.id && u.id !== selectedUnitId) setSelectedUnitId(u.id);
-    if (l?.id && l.id !== selectedLessonId) setSelectedLessonId(l.id);
+    const firstStrand = strands[0]?.strand || "";
+    if (!selectedStrand || !strands.some((s) => s.strand === selectedStrand)) {
+      setSelectedStrand(firstStrand);
+    }
+
+    const firstUnit = selectedGradeObj.units[0];
+    if (!selectedUnitId || !selectedGradeObj.units.some((u) => u.id === selectedUnitId)) {
+      if (firstUnit?.id) setSelectedUnitId(firstUnit.id);
+      if (firstUnit?.lessons[0]?.id) setSelectedLessonId(firstUnit.lessons[0].id);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedGrade]);
+
+  // Keep unit/lesson valid when strand changes.
+  useEffect(() => {
+    const group = strands.find((s) => s.strand === selectedStrand);
+    const units = group?.units || [];
+    if (!units.length) return;
+    const u = units.find((x) => x.id === selectedUnitId) || units[0]!;
+    const l = u.lessons.find((x) => x.id === selectedLessonId) || u.lessons[0];
+    if (u.id !== selectedUnitId) setSelectedUnitId(u.id);
+    if (l?.id && l.id !== selectedLessonId) setSelectedLessonId(l.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedStrand]);
 
   // Load first question when lesson changes.
   useEffect(() => {
@@ -114,6 +160,21 @@ export function LessonsClient({ tier }: { tier: Tier }) {
     void loadNextQuestion();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedLessonId]);
+
+  function recordAttempt(lessonId: string, correct: boolean) {
+    setAttemptsByLesson((prev) => {
+      const existing = prev[lessonId] || [];
+      const next = [...existing, { correct, ts: Date.now() }].slice(-50);
+      const updated = { ...prev, [lessonId]: next };
+      writeJson(STORAGE_ATTEMPTS, updated);
+      return updated;
+    });
+  }
+
+  function scoreLabel(lessonId: string) {
+    const pct = pctFromAttempts(attemptsByLesson[lessonId] || []);
+    return pct === null ? "N/A" : `${pct}%`;
+  }
 
   async function loadNextQuestion() {
     const lessonId = selectedLessonId;
@@ -125,7 +186,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
     setUserInput("");
 
     try {
-      // Free tier gating (first lesson only per unit)
+      // Tier gating (first lesson only per unit for free tier)
       const unit = selectedUnit;
       if (unit) {
         const idx = unit.lessons.findIndex((l) => l.id === lessonId);
@@ -138,7 +199,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
         }
       }
 
-      // 1) Question bank first
+      // 1) Bank first
       const bank = getBankForLesson(lessonId);
       const used = readJson<Record<string, string[]>>(STORAGE_USED_BANK, {});
       const usedIds = new Set(used[lessonId] || []);
@@ -148,7 +209,6 @@ export function LessonsClient({ tier }: { tier: Tier }) {
       setBankInfo({ total: bank.length, remaining });
 
       if (nextBank) {
-        // mark as used immediately (so refresh doesn't repeat too much)
         const updated = { ...used, [lessonId]: [...(used[lessonId] || []), nextBank.id] };
         writeJson(STORAGE_USED_BANK, updated);
         setQuestion(nextBank);
@@ -171,9 +231,8 @@ export function LessonsClient({ tier }: { tier: Tier }) {
         return;
       }
 
-      // 3) No AI tier -> allow repeats (cycle bank)
+      // 3) No AI tier -> cycle bank
       if (bank.length > 0) {
-        // reset used list for this lesson
         const updated = { ...used, [lessonId]: [] };
         writeJson(STORAGE_USED_BANK, updated);
         setQuestion(bank[0]!);
@@ -191,135 +250,205 @@ export function LessonsClient({ tier }: { tier: Tier }) {
     }
   }
 
-  function recordAttempt(lessonId: string, correct: boolean) {
-    const all = readJson<Record<string, Attempt[]>>(STORAGE_ATTEMPTS, {});
-    const prev = all[lessonId] || [];
-    const next = [...prev, { correct, ts: Date.now() }].slice(-50);
-    const updated = { ...all, [lessonId]: next };
-    writeJson(STORAGE_ATTEMPTS, updated);
-  }
-
-  const attemptsByLesson = useMemo(() => readJson<Record<string, Attempt[]>>(STORAGE_ATTEMPTS, {}), [selectedLessonId]);
-
-  function scoreLabel(lessonId: string) {
-    const pct = pctFromAttempts(attemptsByLesson[lessonId] || []);
-    return pct === null ? "N/A" : `${pct}%`;
-  }
-
   const unitDisplay = selectedUnit ? `${selectedUnit.strand} • ${selectedUnit.title}` : "";
 
+  const strandGroup = strands.find((s) => s.strand === selectedStrand);
+  const unitsInStrand = strandGroup?.units || [];
+  const query = sidebarQuery.trim().toLowerCase();
+  const filteredUnits = useMemo<UnitRef[]>(() => {
+    if (!query) return unitsInStrand;
+    return unitsInStrand
+      .map((u) => ({
+        ...u,
+        lessons: u.lessons.filter((l) => l.title.toLowerCase().includes(query) || (l.note || "").toLowerCase().includes(query)),
+      }))
+      .filter((u) => u.lessons.length > 0);
+  }, [query, unitsInStrand]);
+
   return (
-    <div className="grid grid-cols-1 gap-6 md:grid-cols-[320px_1fr]">
+    <div className="grid grid-cols-1 gap-6 md:grid-cols-[340px_1fr]">
       {/* Sidebar */}
-      <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
-        <div className="text-sm font-semibold text-slate-900">Browse lessons</div>
-        <div className="mt-1 text-xs text-slate-600">
-          Grade → Unit → Lesson. Score = last 20 questions.
+      <aside className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-slate-900">Browse lessons</div>
+            <div className="mt-1 text-xs text-slate-600">Grade → Strand → Unit → Lesson • Score = last 20</div>
+          </div>
         </div>
 
-        <div className="mt-4 space-y-3">
-          {grades.map((g) => {
-            const disabled = g.grade !== 7;
-            const open = selectedGrade === g.grade;
-            return (
-              <details
-                key={g.grade}
-                open={open}
-                className={`rounded-2xl border ${disabled ? "border-slate-200 bg-white/50" : "border-slate-200 bg-white"}`}
-                onToggle={(e) => {
-                  const isOpen = (e.target as HTMLDetailsElement).open;
-                  if (isOpen && !disabled) setSelectedGrade(g.grade);
-                }}
-              >
-                <summary
-                  className={`cursor-pointer list-none rounded-2xl px-3 py-2 text-sm font-semibold ${disabled ? "text-slate-400" : "text-slate-800"}`}
+        {/* Grades */}
+        <div className="mt-4">
+          <div className="text-xs font-semibold text-slate-700">Grades</div>
+          <div className="mt-2 grid grid-cols-3 gap-2">
+            {grades.map((g) => {
+              const disabled = g.grade !== 7;
+              const active = selectedGrade === g.grade;
+              return (
+                <button
+                  key={g.grade}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => setSelectedGrade(g.grade)}
+                  className={`rounded-2xl border px-3 py-2 text-left text-sm font-semibold transition ${
+                    active
+                      ? "border-slate-900 bg-slate-900 text-white"
+                      : disabled
+                        ? "cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400"
+                        : "border-slate-200 bg-white text-slate-900 hover:bg-slate-50"
+                  }`}
                   title={disabled ? "Coming soon" : undefined}
                 >
-                  {g.label} {disabled && <span className="ml-2 text-xs font-medium text-slate-400">(coming soon)</span>}
-                </summary>
+                  {g.label}
+                  {disabled && <span className="ml-2 text-xs font-semibold">Soon</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
 
-                {!disabled && (
-                  <div className="px-3 pb-3">
-                    <div className="space-y-2">
-                      {g.units.map((u) => {
-                        const unitOpen = u.id === selectedUnitId;
+        {/* Strand tabs */}
+        <div className="mt-5">
+          <div className="flex items-end justify-between gap-2">
+            <div className="text-xs font-semibold text-slate-700">Strands</div>
+            <div className="text-[11px] text-slate-500">Grade {selectedGrade}</div>
+          </div>
+          <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+            {strands.map((s) => {
+              const active = s.strand === selectedStrand;
+              return (
+                <button
+                  key={s.strand}
+                  type="button"
+                  onClick={() => {
+                    setSelectedStrand(s.strand);
+                    setSidebarQuery("");
+                  }}
+                  className={`whitespace-nowrap rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
+                    active
+                      ? "border-slate-900 bg-slate-900 text-white"
+                      : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                  }`}
+                >
+                  {strandLabel(s.strand)}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Search */}
+        <div className="mt-4">
+          <div className="relative">
+            <input
+              value={sidebarQuery}
+              onChange={(e) => setSidebarQuery(e.target.value)}
+              placeholder="Search lessons…"
+              className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm text-slate-900 outline-none placeholder:text-slate-400 focus:border-slate-400"
+            />
+            {sidebarQuery.trim() && (
+              <button
+                type="button"
+                onClick={() => setSidebarQuery("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full px-2 py-1 text-xs font-semibold text-slate-500 hover:bg-slate-100"
+                aria-label="Clear search"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Units + Lessons */}
+        <div className="mt-4 space-y-2">
+          {(filteredUnits.length ? filteredUnits : unitsInStrand).map((u) => {
+            const open = u.id === selectedUnitId;
+            const showLessons = query ? true : open;
+
+            const originalUnit = selectedGradeObj.units.find((uu) => uu.id === u.id) || u;
+
+            return (
+              <div key={u.id} className="rounded-2xl border border-slate-200 bg-slate-50">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedUnitId(u.id);
+                    const first = u.lessons[0]?.id || "";
+                    if (first) setSelectedLessonId(first);
+                    setActiveTab("practice");
+                  }}
+                  className={`w-full rounded-2xl px-3 py-3 text-left transition ${open ? "bg-white" : "hover:bg-white/60"}`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-semibold text-slate-600">{u.strand}</div>
+                      <div className="mt-0.5 text-sm font-bold text-slate-900">{u.title}</div>
+                    </div>
+                    <div className="mt-0.5 rounded-full border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-600">
+                      {u.lessons.length} lessons
+                    </div>
+                  </div>
+                </button>
+
+                {showLessons && (
+                  <div className="px-2 pb-2">
+                    <div className="space-y-1">
+                      {u.lessons.map((l: LessonRef) => {
+                        const originalIdx = Math.max(0, originalUnit.lessons.findIndex((x) => x.id === l.id));
+                        const unlocked = isLessonUnlocked({ tier, unit: originalUnit, lessonIndex: originalIdx });
+                        const active = l.id === selectedLessonId;
+                        const pct = scoreLabel(l.id);
                         return (
-                          <details
-                            key={u.id}
-                            open={unitOpen}
-                            className="rounded-2xl border border-slate-200 bg-slate-50"
-                            onToggle={(e) => {
-                              const isOpen = (e.target as HTMLDetailsElement).open;
-                              if (isOpen) {
-                                setSelectedUnitId(u.id);
-                                setSelectedLessonId(u.lessons[0]?.id || "");
-                              }
+                          <button
+                            key={l.id}
+                            type="button"
+                            onClick={() => {
+                              if (!unlocked) return;
+                              setSelectedUnitId(u.id);
+                              setSelectedLessonId(l.id);
+                              setActiveTab("practice");
                             }}
+                            className={`group flex w-full items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-left text-sm transition ${
+                              active
+                                ? "border-slate-900 bg-slate-900 text-white"
+                                : unlocked
+                                  ? "border-slate-200 bg-white text-slate-900 hover:bg-slate-100"
+                                  : "cursor-not-allowed border-slate-200 bg-white/60 text-slate-400"
+                            }`}
+                            title={!unlocked ? "Upgrade to unlock" : l.note}
                           >
-                            <summary className="cursor-pointer list-none rounded-2xl px-3 py-2">
-                              <div className="text-xs font-semibold text-slate-700">{u.strand}</div>
-                              <div className="text-sm font-semibold text-slate-900">{u.title}</div>
-                            </summary>
-
-                            <div className="px-2 pb-2">
-                              <div className="space-y-1">
-                                {u.lessons.map((l, idx) => {
-                                  const unlocked = isLessonUnlocked({ tier, unit: u, lessonIndex: idx });
-                                  const active = l.id === selectedLessonId;
-                                  const pct = scoreLabel(l.id);
-                                  return (
-                                    <button
-                                      key={l.id}
-                                      type="button"
-                                      onClick={() => {
-                                        if (!unlocked) return;
-                                        setSelectedUnitId(u.id);
-                                        setSelectedLessonId(l.id);
-                                        setActiveTab("practice");
-                                      }}
-                                      className={`w-full rounded-2xl border px-3 py-2 text-left text-sm transition ${
-                                        active
-                                          ? "border-slate-900 bg-slate-900 text-white"
-                                          : unlocked
-                                            ? "border-slate-200 bg-white text-slate-900 hover:bg-slate-100"
-                                            : "cursor-not-allowed border-slate-200 bg-white/60 text-slate-400"
-                                      }`}
-                                      title={!unlocked ? "Upgrade to unlock" : l.note}
-                                    >
-                                      <div className="flex items-center justify-between gap-3">
-                                        <div className="font-semibold">
-                                          {l.title}
-                                          {!unlocked && <span className="ml-2 text-xs">🔒</span>}
-                                        </div>
-                                        <div
-                                          className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${
-                                            active
-                                              ? "bg-white/15 text-white"
-                                              : "bg-slate-100 text-slate-700"
-                                          }`}
-                                        >
-                                          {pct}
-                                        </div>
-                                      </div>
-                                      {l.note && unlocked && (
-                                        <div className={`mt-1 text-xs ${active ? "text-white/75" : "text-slate-500"}`}>{l.note}</div>
-                                      )}
-                                    </button>
-                                  );
-                                })}
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <div className={`truncate font-semibold ${active ? "text-white" : ""}`}>{l.title}</div>
+                                {!unlocked && <span className="text-xs">🔒</span>}
                               </div>
+                              {l.note && unlocked && (
+                                <div className={`mt-0.5 truncate text-xs ${active ? "text-white/70" : "text-slate-500"}`}>{l.note}</div>
+                              )}
                             </div>
-                          </details>
+                            <div
+                              className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${
+                                active ? "bg-white/15 text-white" : "bg-slate-100 text-slate-700"
+                              }`}
+                            >
+                              {pct}
+                            </div>
+                          </button>
                         );
                       })}
                     </div>
                   </div>
                 )}
-              </details>
+              </div>
             );
           })}
         </div>
-      </div>
+
+        {query && filteredUnits.length === 0 && (
+          <div className="mt-3 rounded-2xl border border-slate-200 bg-white p-3 text-sm text-slate-600">
+            No lessons match “{sidebarQuery}”.
+          </div>
+        )}
+      </aside>
 
       {/* Main */}
       <div className="min-w-0 space-y-4">
@@ -366,9 +495,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
             <div className="rounded-3xl border border-slate-200 bg-white p-6">
               <div className="text-sm font-semibold text-slate-900">Lesson video</div>
               <div className="mt-3 aspect-video w-full rounded-2xl border border-dashed border-slate-300 bg-slate-50" />
-              <div className="mt-2 text-xs text-slate-500">
-                Video player placeholder (you can wire this to your hosting later).
-              </div>
+              <div className="mt-2 text-xs text-slate-500">Video player placeholder (wire this up later).</div>
             </div>
 
             {/* Practice */}
