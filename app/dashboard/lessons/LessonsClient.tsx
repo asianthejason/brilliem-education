@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useUser } from "@clerk/nextjs";
 import {
   GRADES_7_TO_12,
   isLessonUnlocked,
@@ -13,62 +12,44 @@ import { checkAnswer, getBankForLesson, type Question } from "@/lib/questionBank
 
 type Attempt = { correct: boolean; ts: number };
 
-type PracticeProgress = {
-  version: 1;
-  updatedAt: number;
-  attemptsByLesson: Record<string, Attempt[]>;
-  usedBankByLesson: Record<string, string[]>;
-};
+const STORAGE_ATTEMPTS = "brilliem_lesson_attempts_v1";
+const STORAGE_USED_BANK = "brilliem_lesson_used_bank_v1";
 
-function isObject(v: unknown): v is Record<string, any> {
-  return !!v && typeof v === "object" && !Array.isArray(v);
+function readJson<T>(key: string, fallback: T): T {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
 }
 
-function normalizeProgress(raw: unknown): PracticeProgress {
-  const empty: PracticeProgress = {
-    version: 1,
-    updatedAt: Date.now(),
-    attemptsByLesson: {},
-    usedBankByLesson: {},
-  };
-
-  if (!isObject(raw)) return empty;
-
-  const attemptsByLesson: Record<string, Attempt[]> = {};
-  const usedBankByLesson: Record<string, string[]> = {};
-
-  if (isObject(raw.attemptsByLesson)) {
-    for (const [lessonId, attempts] of Object.entries(raw.attemptsByLesson)) {
-      if (!Array.isArray(attempts)) continue;
-      const clean = attempts
-        .filter((a) => isObject(a) && typeof a.correct === "boolean" && typeof a.ts === "number")
-        .map((a) => ({ correct: !!a.correct, ts: Number(a.ts) }))
-        .slice(-50);
-      attemptsByLesson[lessonId] = clean;
-    }
+function writeJson<T>(key: string, value: T) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // ignore storage errors
   }
-
-  if (isObject(raw.usedBankByLesson)) {
-    for (const [lessonId, ids] of Object.entries(raw.usedBankByLesson)) {
-      if (!Array.isArray(ids)) continue;
-      usedBankByLesson[lessonId] = ids.filter((x) => typeof x === "string").slice(-300);
-    }
-  }
-
-  return {
-    version: 1,
-    updatedAt: typeof raw.updatedAt === "number" ? raw.updatedAt : Date.now(),
-    attemptsByLesson,
-    usedBankByLesson,
-  };
 }
 
 function pctFromAttempts(attempts: Attempt[]): number | null {
   if (!attempts || attempts.length === 0) return null;
   const last = attempts.slice(-20);
   const correct = last.filter((a) => a.correct).length;
-  // Score is ALWAYS out of 20. Unanswered are treated as incorrect.
+  // Score is ALWAYS out of the last 20 questions.
+  // If fewer than 20 have been answered, the remaining are treated as incorrect.
   return Math.round((correct / 20) * 100);
+}
+
+function bankStatus(lessonId: string) {
+  const used = readJson<Record<string, string[]>>(STORAGE_USED_BANK, {});
+  const usedIds = new Set(used[lessonId] || []);
+  const bank = getBankForLesson(lessonId);
+  const remaining = bank.filter((q) => !usedIds.has(q.id)).length;
+  return { total: bank.length, remaining };
 }
 
 async function fetchAiQuestion(params: { lessonId: string; recentPrompts: string[] }) {
@@ -84,31 +65,20 @@ async function fetchAiQuestion(params: { lessonId: string; recentPrompts: string
   return json.question as Question;
 }
 
-function strandLabel(strand: string) {
-  const s = strand.toLowerCase();
-  if (s === "number") return "Numbers";
-  if (s.includes("pattern")) return "Patterns & Relations";
-  if (s.includes("shape")) return "Shape & Space";
-  if (s.includes("stat")) return "Statistics & Probability";
-  return strand;
-}
-
 export function LessonsClient({ tier }: { tier: Tier }) {
-  const { user, isLoaded } = useUser();
-
   const grades = GRADES_7_TO_12;
+
   const grade7 = grades.find((g) => g.grade === 7) || grades[0]!;
   const initialUnit = grade7.units[0];
   const initialLesson = initialUnit?.lessons[0];
 
   const [selectedGrade, setSelectedGrade] = useState<number>(grade7.grade);
-  const [selectedStrand, setSelectedStrand] = useState<string>(initialUnit?.strand || "");
   const [selectedUnitId, setSelectedUnitId] = useState<string>(initialUnit?.id || "");
   const [selectedLessonId, setSelectedLessonId] = useState<string>(initialLesson?.id || "");
+  const [selectedStrand, setSelectedStrand] = useState<string>(initialUnit?.strand || "");
+  const [lessonSearch, setLessonSearch] = useState<string>("");
 
   const [activeTab, setActiveTab] = useState<"practice" | "unit_test">("practice");
-
-  const [lessonQuery, setLessonQuery] = useState<string>("");
 
   const [question, setQuestion] = useState<Question | null>(null);
   const [userInput, setUserInput] = useState<string>("");
@@ -116,80 +86,6 @@ export function LessonsClient({ tier }: { tier: Tier }) {
   const [loadingQ, setLoadingQ] = useState(false);
   const [qError, setQError] = useState<string | null>(null);
   const [bankInfo, setBankInfo] = useState<{ total: number; remaining: number }>({ total: 0, remaining: 0 });
-
-  // Progress is stored in Clerk user unsafeMetadata (cross-device).
-  const [attemptsByLesson, setAttemptsByLesson] = useState<Record<string, Attempt[]>>({});
-  const [usedBankByLesson, setUsedBankByLesson] = useState<Record<string, string[]>>({});
-
-  const attemptsRef = useRef<Record<string, Attempt[]>>({});
-  const usedRef = useRef<Record<string, string[]>>({});
-
-  useEffect(() => {
-    attemptsRef.current = attemptsByLesson;
-  }, [attemptsByLesson]);
-
-  useEffect(() => {
-    usedRef.current = usedBankByLesson;
-  }, [usedBankByLesson]);
-
-  // Load progress from Clerk when user is ready.
-  useEffect(() => {
-    if (!isLoaded || !user) return;
-    const raw = (user.unsafeMetadata as any)?.practiceProgress;
-    const prog = normalizeProgress(raw);
-    setAttemptsByLesson(prog.attemptsByLesson);
-    setUsedBankByLesson(prog.usedBankByLesson);
-  }, [isLoaded, user]);
-
-  // Batched metadata saves (avoid spamming on every keystroke).
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingSave = useRef<PracticeProgress | null>(null);
-
-  function scheduleSave(nextAttempts?: Record<string, Attempt[]>, nextUsed?: Record<string, string[]>) {
-    if (!user) return;
-
-    const attempts = nextAttempts ?? attemptsRef.current;
-    const used = nextUsed ?? usedRef.current;
-
-    pendingSave.current = {
-      version: 1,
-      updatedAt: Date.now(),
-      attemptsByLesson: attempts,
-      usedBankByLesson: used,
-    };
-
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      const payload = pendingSave.current;
-      pendingSave.current = null;
-      if (!payload) return;
-      try {
-        // Preserve existing metadata keys.
-        const currentUnsafe = (user.unsafeMetadata || {}) as Record<string, any>;
-        await user.update({
-          unsafeMetadata: { ...currentUnsafe, practiceProgress: payload },
-        });
-      } catch {
-        // If saving fails (offline etc.), UI still works; it'll try again next update.
-      }
-    }, 600);
-  }
-
-  function recordAttempt(lessonId: string, correct: boolean) {
-    setAttemptsByLesson((prev) => {
-      const existing = prev[lessonId] || [];
-      const next = [...existing, { correct, ts: Date.now() }].slice(-50);
-      const updated = { ...prev, [lessonId]: next };
-      // Instant UI update + queued Clerk save
-      scheduleSave(updated, undefined);
-      return updated;
-    });
-  }
-
-  function scoreLabel(lessonId: string) {
-    const pct = pctFromAttempts(attemptsByLesson[lessonId] || []);
-    return pct === null ? "N/A" : `${pct}%`;
-  }
 
   const recentPromptsRef = useRef<string[]>([]);
   const lastAiCallAt = useRef<number>(0);
@@ -200,66 +96,56 @@ export function LessonsClient({ tier }: { tier: Tier }) {
   );
 
   const strands = useMemo(() => {
-    const map = new Map<string, UnitRef[]>();
-    for (const u of selectedGradeObj.units) {
-      map.set(u.strand, [...(map.get(u.strand) || []), u]);
-    }
-    return Array.from(map.entries()).map(([strand, units]) => ({ strand, units }));
-  }, [selectedGradeObj.units]);
+    const s = Array.from(new Set(selectedGradeObj.units.map((u) => u.strand).filter(Boolean)));
+    return s;
+  }, [selectedGradeObj]);
 
-  const unitsInSelectedStrand = useMemo(() => {
-    const group = strands.find((s) => s.strand === selectedStrand);
-    return group?.units || [];
-  }, [strands, selectedStrand]);
+  const effectiveStrand = selectedStrand && strands.includes(selectedStrand) ? selectedStrand : strands[0] || "";
 
-  const selectedUnit = useMemo<UnitRef | null>(() => {
-    return (
-      selectedGradeObj.units.find((u) => u.id === selectedUnitId) ||
-      unitsInSelectedStrand[0] ||
-      selectedGradeObj.units[0] ||
-      null
-    );
-  }, [selectedGradeObj.units, selectedUnitId, unitsInSelectedStrand]);
+  const unitsForStrand = useMemo<UnitRef[]>(
+    () => selectedGradeObj.units.filter((u) => (effectiveStrand ? u.strand === effectiveStrand : true)),
+    [selectedGradeObj, effectiveStrand]
+  );
 
-  const selectedLesson = useMemo<LessonRef | null>(() => {
-    return (
-      selectedUnit?.lessons.find((l) => l.id === selectedLessonId) ||
-      selectedUnit?.lessons[0] ||
-      null
-    );
-  }, [selectedUnit, selectedLessonId]);
+  const selectedUnit = useMemo<UnitRef | null>(
+    () => unitsForStrand.find((u) => u.id === selectedUnitId) || unitsForStrand[0] || null,
+    [unitsForStrand, selectedUnitId]
+  );
 
-  // Keep selection valid when grade changes.
+  const selectedLesson = useMemo<LessonRef | null>(
+    () => selectedUnit?.lessons.find((l) => l.id === selectedLessonId) || selectedUnit?.lessons[0] || null,
+    [selectedUnit, selectedLessonId]
+  );
+
+  const gradeLessonCount = useMemo(
+    () => selectedGradeObj.units.reduce((sum, u) => sum + u.lessons.length, 0),
+    [selectedGradeObj]
+  );
+
+  // Keep selected IDs valid when grade/strand changes.
   useEffect(() => {
-    const firstStrand = strands[0]?.strand || "";
-    if (!selectedStrand || !strands.some((s) => s.strand === selectedStrand)) {
-      setSelectedStrand(firstStrand);
-    }
+    const g = selectedGradeObj;
+    const s = Array.from(new Set(g.units.map((u) => u.strand).filter(Boolean)));
+    const strand = selectedStrand && s.includes(selectedStrand) ? selectedStrand : s[0] || "";
+    if (strand !== selectedStrand) setSelectedStrand(strand);
 
-    const firstUnit = selectedGradeObj.units[0];
-    if (!selectedUnitId || !selectedGradeObj.units.some((u) => u.id === selectedUnitId)) {
-      if (firstUnit?.id) setSelectedUnitId(firstUnit.id);
-      if (firstUnit?.lessons[0]?.id) setSelectedLessonId(firstUnit.lessons[0].id);
-    }
-    setLessonQuery("");
+    const units = g.units.filter((u) => (strand ? u.strand === strand : true));
+    const u = units.find((x) => x.id === selectedUnitId) || units[0];
+    const l = u?.lessons.find((x) => x.id === selectedLessonId) || u?.lessons[0];
+
+    if (u?.id && u.id !== selectedUnitId) setSelectedUnitId(u.id);
+    if (l?.id && l.id !== selectedLessonId) setSelectedLessonId(l.id);
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedGrade, selectedStrand]);
+
+    // Clear the grade-wide search when grade changes (keeps UI predictable).
+  useEffect(() => {
+    setLessonSearch("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedGrade]);
 
-  // Keep unit/lesson valid when strand changes.
-  useEffect(() => {
-    const units = unitsInSelectedStrand;
-    if (!units.length) return;
-    const u = units.find((x) => x.id === selectedUnitId) || units[0]!;
-    const l = u.lessons.find((x) => x.id === selectedLessonId) || u.lessons[0];
-
-    if (u.id !== selectedUnitId) setSelectedUnitId(u.id);
-    if (l?.id && l.id !== selectedLessonId) setSelectedLessonId(l.id);
-
-    setLessonQuery("");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedStrand]);
-
-  // Load first question when lesson changes.
+// Load first question when lesson changes.
   useEffect(() => {
     if (!selectedLessonId) return;
     void loadNextQuestion();
@@ -276,7 +162,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
     setUserInput("");
 
     try {
-      // Tier gating (first lesson only per unit for free tier)
+      // Free tier gating (first lesson only per unit)
       const unit = selectedUnit;
       if (unit) {
         const idx = unit.lessons.findIndex((l) => l.id === lessonId);
@@ -289,23 +175,19 @@ export function LessonsClient({ tier }: { tier: Tier }) {
         }
       }
 
-      // 1) Bank first
+      // 1) Question bank first
       const bank = getBankForLesson(lessonId);
-      const usedIds = new Set(usedBankByLesson[lessonId] || []);
+      const used = readJson<Record<string, string[]>>(STORAGE_USED_BANK, {});
+      const usedIds = new Set(used[lessonId] || []);
 
       const nextBank = bank.find((qq) => !usedIds.has(qq.id)) || null;
       const remaining = bank.filter((qq) => !usedIds.has(qq.id)).length;
       setBankInfo({ total: bank.length, remaining });
 
       if (nextBank) {
-        setUsedBankByLesson((prev) => {
-          const current = prev[lessonId] || [];
-          const next = [...current, nextBank.id].slice(-300);
-          const updated = { ...prev, [lessonId]: next };
-          scheduleSave(undefined, updated);
-          return updated;
-        });
-
+        // mark as used immediately (so refresh doesn't repeat too much)
+        const updated = { ...used, [lessonId]: [...(used[lessonId] || []), nextBank.id] };
+        writeJson(STORAGE_USED_BANK, updated);
         setQuestion(nextBank);
         return;
       }
@@ -326,178 +208,241 @@ export function LessonsClient({ tier }: { tier: Tier }) {
         return;
       }
 
-      // 3) No AI tier -> cycle bank
+      // 3) No AI tier -> allow repeats (cycle bank)
       if (bank.length > 0) {
-        setUsedBankByLesson((prev) => {
-          const updated = { ...prev, [lessonId]: [] };
-          scheduleSave(undefined, updated);
-          return updated;
-        });
+        // reset used list for this lesson
+        const updated = { ...used, [lessonId]: [] };
+        writeJson(STORAGE_USED_BANK, updated);
         setQuestion(bank[0]!);
         setBankInfo({ total: bank.length, remaining: bank.length - 1 });
         return;
       }
 
       setQuestion(null);
-      setQError("Practice bank for this lesson is coming soon.");
-    } catch (e: any) {
-      setQuestion(null);
-      setQError(e?.message || "Failed to load question");
-    } finally {
-      setLoadingQ(false);
-    }
-  }
-
-  const unitDisplay = selectedUnit ? `${strandLabel(selectedUnit.strand)} • ${selectedUnit.title}` : "";
-
-  const filteredLessons = useMemo(() => {
-    const lessons = selectedUnit?.lessons || [];
-    const q = lessonQuery.trim().toLowerCase();
-    if (!q) return lessons;
-    return lessons.filter(
-      (l) => l.title.toLowerCase().includes(q) || (l.note || "").toLowerCase().includes(q)
-    );
-  }, [lessonQuery, selectedUnit]);
-
-  return (
-    <div className="grid grid-cols-1 gap-6 md:grid-cols-[320px_1fr]">
-      {/* Sidebar (sleek / minimal selectors) */}
-      <aside className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
+      setQError("Practice bank f      {/* Sidebar */}
+      <div className="sticky top-6 self-start rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <div className="text-sm font-semibold text-slate-900">Lessons</div>
-            <div className="mt-1 text-xs text-slate-600">Pick a grade, strand, unit, then practice.</div>
+            <div className="text-base font-semibold text-slate-900">Lessons</div>
+            <div className="mt-0.5 text-xs text-slate-500">Pick a grade, then search or choose a unit.</div>
           </div>
-          <div className="rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-700">
+          <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
             Score = last 20
           </div>
         </div>
 
-        {/* Grade chips */}
-        <div className="mt-4">
-          <div className="flex gap-2 overflow-x-auto pb-1">
-            {grades.map((g) => {
-              const disabled = g.grade !== 7;
-              const active = selectedGrade === g.grade;
-              return (
-                <button
-                  key={g.grade}
-                  type="button"
-                  disabled={disabled}
-                  onClick={() => setSelectedGrade(g.grade)}
-                  className={`whitespace-nowrap rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
-                    active
-                      ? "border-slate-900 bg-slate-900 text-white"
-                      : disabled
-                        ? "cursor-not-allowed border-slate-200 bg-white text-slate-400"
-                        : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-                  }`}
-                  title={disabled ? "Coming soon" : undefined}
-                >
-                  {g.label}
-                  {disabled && <span className="ml-1">• Soon</span>}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Strand + Unit selects */}
-        <div className="mt-4 space-y-3">
+        {/* Grade */}
+        <div className="mt-4 space-y-4">
           <div>
-            <label className="text-[11px] font-semibold text-slate-600">Strand</label>
+            <label className="text-xs font-semibold text-slate-600">Grade</label>
             <select
-              value={selectedStrand}
-              onChange={(e) => setSelectedStrand(e.target.value)}
-              className="mt-1 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-slate-400"
-            >
-              {strands.map((s) => (
-                <option key={s.strand} value={s.strand}>
-                  {strandLabel(s.strand)}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="text-[11px] font-semibold text-slate-600">Unit</label>
-            <select
-              value={selectedUnitId}
+              className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none transition focus:border-slate-300"
+              value={selectedGrade}
               onChange={(e) => {
-                setSelectedUnitId(e.target.value);
-                setActiveTab("practice");
+                const g = Number(e.target.value);
+                setSelectedGrade(g);
               }}
-              className="mt-1 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-slate-400"
             >
-              {unitsInSelectedStrand.map((u) => (
-                <option key={u.id} value={u.id}>
-                  {u.title}
+              {grades.map((g) => (
+                <option key={g.grade} value={g.grade} disabled={g.grade !== 7}>
+                  {g.grade === 7 ? `Grade ${g.grade}` : `Grade ${g.grade} (Soon)`}
                 </option>
               ))}
             </select>
           </div>
-        </div>
 
-        {/* Lesson list */}
-        <div className="mt-4">
-          <div className="flex items-center justify-between">
-            <div className="text-[11px] font-semibold text-slate-600">Lessons</div>
-            <div className="text-[11px] text-slate-500">{filteredLessons.length}/{selectedUnit?.lessons.length || 0}</div>
-          </div>
-
-          <div className="mt-2">
-            <input
-              value={lessonQuery}
-              onChange={(e) => setLessonQuery(e.target.value)}
-              placeholder="Search lessons…"
-              className="w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none placeholder:text-slate-400 focus:border-slate-400"
-            />
-          </div>
-
-          <div className="mt-3 max-h-[55vh] space-y-2 overflow-auto pr-1">
-            {(filteredLessons.length ? filteredLessons : selectedUnit?.lessons || []).map((l) => {
-              const unit = selectedUnit!;
-              const idx = Math.max(0, unit.lessons.findIndex((x) => x.id === l.id));
-              const unlocked = isLessonUnlocked({ tier, unit, lessonIndex: idx });
-              const active = l.id === selectedLessonId;
-              const pct = scoreLabel(l.id);
-
-              return (
+          {/* Grade-wide search */}
+          <div>
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-slate-600">Search</label>
+              {lessonSearch.trim().length > 0 && (
                 <button
-                  key={l.id}
                   type="button"
-                  onClick={() => {
-                    if (!unlocked) return;
-                    setSelectedLessonId(l.id);
-                    setActiveTab("practice");
-                  }}
-                  className={`flex w-full items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-left text-sm transition ${
-                    active
-                      ? "border-slate-900 bg-slate-900 text-white"
-                      : unlocked
-                        ? "border-slate-200 bg-white text-slate-900 hover:bg-slate-50"
-                        : "cursor-not-allowed border-slate-200 bg-white/60 text-slate-400"
-                  }`}
-                  title={!unlocked ? "Upgrade to unlock" : l.note}
+                  className="text-[11px] font-medium text-slate-500 hover:text-slate-700"
+                  onClick={() => setLessonSearch("")}
                 >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <div className={`truncate font-semibold ${active ? "text-white" : ""}`}>{l.title}</div>
-                      {!unlocked && <span className="text-xs">🔒</span>}
-                    </div>
-                    {l.note && unlocked && (
-                      <div className={`mt-0.5 truncate text-xs ${active ? "text-white/70" : "text-slate-500"}`}>{l.note}</div>
-                    )}
-                  </div>
-                  <div className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${active ? "bg-white/15 text-white" : "bg-slate-100 text-slate-700"}`}>
-                    {pct}
-                  </div>
+                  Clear
                 </button>
-              );
-            })}
+              )}
+            </div>
+            <input
+              className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-slate-300"
+              value={lessonSearch}
+              onChange={(e) => setLessonSearch(e.target.value)}
+              placeholder={`Search Grade ${selectedGrade} lessons...`}
+            />
+            <div className="mt-1 text-[11px] text-slate-500">
+              Searches the whole grade (not just the current unit).
+            </div>
+          </div>
+
+          {/* Strand + Unit */}
+          <div className="grid grid-cols-1 gap-3">
+            <div>
+              <label className="text-xs font-semibold text-slate-600">Strand</label>
+              <select
+                className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none transition focus:border-slate-300"
+                value={effectiveStrand}
+                onChange={(e) => setSelectedStrand(e.target.value)}
+              >
+                {strands.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-slate-600">Unit</label>
+              <select
+                className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none transition focus:border-slate-300"
+                value={selectedUnitId}
+                onChange={(e) => setSelectedUnitId(e.target.value)}
+              >
+                {unitsForStrand.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.id}: {u.title}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Lessons list */}
+          <div>
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-semibold text-slate-600">Lessons</div>
+              <div className="text-[11px] text-slate-500">
+                {lessonSearch.trim().length > 0
+                  ? "Search results"
+                  : selectedUnit
+                    ? `${selectedUnit.lessons.length}/${gradeLessonCount}`
+                    : `0/${gradeLessonCount}`}
+              </div>
+            </div>
+
+            <div className="mt-2 max-h-[520px] space-y-2 overflow-auto pr-1">
+              {(lessonSearch.trim().length > 0
+                ? selectedGradeObj.units.flatMap((u) =>
+                    u.lessons.map((l, idx) => ({ u, l, idx }))
+                  ).filter(({ u, l }) => {
+                    const q = lessonSearch.trim().toLowerCase();
+                    return (
+                      l.title.toLowerCase().includes(q) ||
+                      u.title.toLowerCase().includes(q) ||
+                      u.id.toLowerCase().includes(q)
+                    );
+                  })
+                : (selectedUnit
+                    ? selectedUnit.lessons.map((l, idx) => ({ u: selectedUnit, l, idx }))
+                    : [])
+              ).map(({ u, l, idx }) => {
+                const unlocked = isLessonUnlocked({ tier, unit: u, lessonIndex: idx });
+                const active = l.id === selectedLessonId;
+
+                const rightLabel = unlocked ? scoreLabel(l.id) : "Locked";
+
+                return (
+                  <button
+                    key={`${u.id}:${l.id}`}
+                    type="button"
+                    className={[
+                      "group flex w-full items-center justify-between gap-3 rounded-2xl border px-3 py-2 text-left transition",
+                      active
+                        ? "border-slate-900 bg-slate-900 text-white"
+                        : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50",
+                      !unlocked && !active ? "opacity-70" : "",
+                    ].join(" ")}
+                    onClick={() => {
+                      if (!unlocked) {
+                        setQError("This lesson is locked in your plan.");
+                        return;
+                      }
+                      setSelectedStrand(u.strand);
+                      setSelectedUnitId(u.id);
+                      setSelectedLessonId(l.id);
+                      setLessonSearch("");
+                    }}
+                    title={
+                      unlocked
+                        ? undefined
+                        : "Locked (Free plan unlocks only the first lesson of each unit)"
+                    }
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-semibold">
+                        {l.title}
+                      </div>
+                      {lessonSearch.trim().length > 0 && (
+                        <div className={["mt-0.5 truncate text-[11px]", active ? "text-white/70" : "text-slate-500"].join(" ")}>
+                          {u.id}: {u.title}
+                        </div>
+                      )}
+                    </div>
+
+                    <div
+                      className={[
+                        "shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold",
+                        active ? "bg-white/15 text-white" : "bg-slate-100 text-slate-700",
+                      ].join(" ")}
+                    >
+                      {rightLabel}
+                    </div>
+                  </button>
+                );
+              })}
+
+              {lessonSearch.trim().length > 0 &&
+                selectedGradeObj.units
+                  .flatMap((u) => u.lessons.map((l) => l.title))
+                  .filter(Boolean).length > 0 &&
+                (selectedGradeObj.units
+                  .flatMap((u) => u.lessons.map((l, idx) => ({ u, l, idx })))
+                  .filter(({ u, l }) => {
+                    const q = lessonSearch.trim().toLowerCase();
+                    return (
+                      l.title.toLowerCase().includes(q) ||
+                      u.title.toLowerCase().includes(q) ||
+                      u.id.toLowerCase().includes(q)
+                    );
+                  }).length === 0) && (
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                    No lessons found.
+                  </div>
+                )}
+            </div>
           </div>
         </div>
-      </aside>
+      </div>
+
+  active
+                                              ? "bg-white/15 text-white"
+                                              : "bg-slate-100 text-slate-700"
+                                          }`}
+                                        >
+                                          {pct}
+                                        </div>
+                                      </div>
+                                      {l.note && unlocked && (
+                                        <div className={`mt-1 text-xs ${active ? "text-white/75" : "text-slate-500"}`}>{l.note}</div>
+                                      )}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          </details>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </details>
+            );
+          })}
+        </div>
+      </div>
 
       {/* Main */}
       <div className="min-w-0 space-y-4">
@@ -544,7 +489,9 @@ export function LessonsClient({ tier }: { tier: Tier }) {
             <div className="rounded-3xl border border-slate-200 bg-white p-6">
               <div className="text-sm font-semibold text-slate-900">Lesson video</div>
               <div className="mt-3 aspect-video w-full rounded-2xl border border-dashed border-slate-300 bg-slate-50" />
-              <div className="mt-2 text-xs text-slate-500">Video player placeholder (wire this up later).</div>
+              <div className="mt-2 text-xs text-slate-500">
+                Video player placeholder (you can wire this to your hosting later).
+              </div>
             </div>
 
             {/* Practice */}
@@ -582,11 +529,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
                           AI
                         </span>
                       )}
-                      <span
-                        dangerouslySetInnerHTML={{
-                          __html: question.prompt.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>"),
-                        }}
-                      />
+                      <span dangerouslySetInnerHTML={{ __html: question.prompt.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>") }} />
                     </div>
 
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -626,10 +569,6 @@ export function LessonsClient({ tier }: { tier: Tier }) {
                   <div className="text-sm text-slate-600">Select a lesson to begin.</div>
                 )}
               </div>
-
-              {!isLoaded && (
-                <div className="mt-3 text-xs text-slate-500">Loading your progress…</div>
-              )}
             </div>
           </>
         )}
