@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useUser } from "@clerk/nextjs";
 import {
   GRADES_7_TO_12,
@@ -23,6 +23,91 @@ type PracticeProgress = {
 function isObject(v: unknown): v is Record<string, any> {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
+
+type RichSeg = { kind: "text" | "bold" | "italic" | "code" | "math"; content: string };
+
+function tokenizeRichText(input: string): RichSeg[] {
+  if (!input) return [];
+  // Supports: **bold**, *italic*, `code`, and common math delimiters ($...$, $$...$$, \(...\), \[...\])
+  const pattern =
+    /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\$\$[\s\S]+?\$\$|\$[^$\n]+\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\))/g;
+
+  const segs: RichSeg[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+
+  while ((m = pattern.exec(input)) !== null) {
+    if (m.index > last) {
+      segs.push({ kind: "text", content: input.slice(last, m.index) });
+    }
+    const tok = m[0];
+
+    if (tok.startsWith("`")) {
+      segs.push({ kind: "code", content: tok.slice(1, -1) });
+    } else if (tok.startsWith("**")) {
+      segs.push({ kind: "bold", content: tok.slice(2, -2) });
+    } else if (tok.startsWith("*")) {
+      segs.push({ kind: "italic", content: tok.slice(1, -1) });
+    } else if (tok.startsWith("$$")) {
+      segs.push({ kind: "math", content: tok.slice(2, -2) });
+    } else if (tok.startsWith("$")) {
+      segs.push({ kind: "math", content: tok.slice(1, -1) });
+    } else if (tok.startsWith("\\[")) {
+      segs.push({ kind: "math", content: tok.slice(2, -2) });
+    } else if (tok.startsWith("\\(")) {
+      segs.push({ kind: "math", content: tok.slice(2, -2) });
+    } else {
+      segs.push({ kind: "text", content: tok });
+    }
+
+    last = m.index + tok.length;
+  }
+
+  if (last < input.length) {
+    segs.push({ kind: "text", content: input.slice(last) });
+  }
+
+  return segs;
+}
+
+function RichText({
+  text,
+  className,
+}: {
+  text?: string | null;
+  className?: string;
+}) {
+  const segs = useMemo(() => tokenizeRichText(text || ""), [text]);
+
+  return (
+    <span className={className}>
+      {segs.map((s, idx) => {
+        if (s.kind === "bold") return <strong key={idx}>{s.content}</strong>;
+        if (s.kind === "italic") return <em key={idx}>{s.content}</em>;
+        if (s.kind === "code")
+          return (
+            <code
+              key={idx}
+              className="mx-0.5 rounded-md border border-slate-200 bg-slate-50 px-1 py-0.5 font-mono text-[0.95em] text-slate-900"
+            >
+              {s.content}
+            </code>
+          );
+        if (s.kind === "math")
+          return (
+            <span
+              key={idx}
+              className="mx-0.5 rounded-md border border-slate-200 bg-white px-1 py-0.5 font-mono text-[0.95em] text-slate-900"
+            >
+              {s.content}
+            </span>
+          );
+        return <span key={idx}>{s.content}</span>;
+      })}
+    </span>
+  );
+}
+
 
 function normalizeProgress(raw: unknown): PracticeProgress {
   const empty: PracticeProgress = {
@@ -89,173 +174,7 @@ function strandLabel(strand: string) {
   return strand;
 }
 
-function findClosing(delim: string, s: string, start: number) {
-  const idx = s.indexOf(delim, start);
-  return idx;
-}
-
-function renderInlineRich(text: string, keyPrefix: string): ReactNode[] {
-  const out: ReactNode[] = [];
-  let i = 0;
-  let k = 0;
-
-  const pushText = (t: string) => {
-    if (!t) return;
-    out.push(<span key={`${keyPrefix}-t-${k++}`}>{t}</span>);
-  };
-
-  while (i < text.length) {
-    // Code: `...`
-    if (text[i] === "`") {
-      const end = findClosing("`", text, i + 1);
-      if (end != -1) {
-        const content = text.slice(i + 1, end);
-        out.push(
-          <code
-            key={`${keyPrefix}-code-${k++}`}
-            className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[0.95em] text-slate-900"
-          >
-            {content}
-          </code>
-        );
-        i = end + 1;
-        continue;
-      }
-    }
-
-    // Display math: $$...$$
-    if (text.startsWith("$$", i)) {
-      const end = findClosing("$$", text, i + 2);
-      if (end != -1) {
-        const content = text.slice(i + 2, end);
-        out.push(
-          <span
-            key={`${keyPrefix}-mathblock-${k++}`}
-            className="inline-block rounded bg-slate-50 px-2 py-1 font-mono text-[0.95em] text-slate-900"
-          >
-            {content}
-          </span>
-        );
-        i = end + 2;
-        continue;
-      }
-    }
-
-    // Display math: \[..\]
-    if (text.startsWith("\[", i)) {
-      const end = findClosing("\\]", text, i + 2);
-      if (end != -1) {
-        const content = text.slice(i + 2, end);
-        out.push(
-          <span
-            key={`${keyPrefix}-mathblock2-${k++}`}
-            className="inline-block rounded bg-slate-50 px-2 py-1 font-mono text-[0.95em] text-slate-900"
-          >
-            {content}
-          </span>
-        );
-        i = end + 2;
-        continue;
-      }
-    }
-
-    // Inline math: \(...\)
-    if (text.startsWith("\(", i)) {
-      const end = findClosing("\\)", text, i + 2);
-      if (end != -1) {
-        const content = text.slice(i + 2, end);
-        out.push(
-          <span key={`${keyPrefix}-math-${k++}`} className="font-mono text-[0.95em] text-slate-900">
-            {content}
-          </span>
-        );
-        i = end + 2;
-        continue;
-      }
-    }
-
-    // Inline math: $...$
-    if (text[i] === "$" ) {
-      const end = findClosing("$", text, i + 1);
-      if (end != -1) {
-        const content = text.slice(i + 1, end);
-        out.push(
-          <span key={`${keyPrefix}-math2-${k++}`} className="font-mono text-[0.95em] text-slate-900">
-            {content}
-          </span>
-        );
-        i = end + 1;
-        continue;
-      }
-    }
-
-    // Bold: **...**
-    if (text.startsWith("**", i)) {
-      const end = findClosing("**", text, i + 2);
-      if (end != -1) {
-        const content = text.slice(i + 2, end);
-        out.push(
-          <strong key={`${keyPrefix}-b-${k++}`} className="font-bold text-slate-900">
-            {content}
-          </strong>
-        );
-        i = end + 2;
-        continue;
-      }
-    }
-
-    // Italic: *...*
-    if (text[i] === "*") {
-      const end = findClosing("*", text, i + 1);
-      if (end != -1) {
-        const content = text.slice(i + 1, end);
-        out.push(
-          <em key={`${keyPrefix}-i-${k++}`} className="italic">
-            {content}
-          </em>
-        );
-        i = end + 1;
-        continue;
-      }
-    }
-
-    // Plain text run until next special token
-    nexts = []
-    for needle in ("`", "$$", "\[", "\(", "$", "**", "*"):
-        j = text.find(needle, i)
-        if j != -1:
-            nexts.append(j)
-    nxt = min(nexts) if nexts else -1
-
-    if nxt == -1:
-      pushText(text[i:])
-      break
-    if nxt == i:
-      pushText(text[i])
-      i += 1
-    else:
-      pushText(text[i:nxt])
-      i = nxt
-
-  return out;
-}
-
-function RichText({ text }: { text: string }) {
-  const lines = (text || "").split("\n");
-  return (
-    <span className="whitespace-pre-wrap">
-      {lines.map((line, idx) => (
-        <span key={`rt-${idx}`}>
-          {renderInlineRich(line, `rt-${idx}`)}
-          {idx < lines.length - 1 ? <br /> : null}
-        </span>
-      ))}
-    </span>
-  );
-}
-
-
-export function LessonsClient({ tier }: { tier: Tier }) {
+export default function LessonsClient({ tier }: { tier: Tier }) {
   const { user, isLoaded } = useUser();
 
   const grades = useMemo(() => GRADES_7_TO_12, []);
@@ -559,9 +478,9 @@ export function LessonsClient({ tier }: { tier: Tier }) {
 
   return (
     <div className="mx-auto w-full max-w-6xl px-4 pb-10 pt-6">
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[380px_1fr]">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[360px_1fr]">
         {/* Sidebar */}
-        <div className="sticky top-6 self-start rounded-3xl border border-slate-200/70 bg-white/80 p-4 shadow-sm backdrop-blur">
+        <div className="sticky top-6 self-start rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex items-start justify-between gap-3">
             <div>
               <div className="text-base font-semibold text-slate-900">{sidebarTitle}</div>
@@ -577,7 +496,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
             <div>
               <label className="text-xs font-semibold text-slate-600">Grade</label>
               <select
-                className="mt-2 w-full rounded-2xl border border-slate-200/70 bg-slate-50 px-3 py-2.5 text-sm font-semibold text-slate-900 outline-none transition focus:border-slate-300 focus:bg-white focus-visible:ring-2 focus-visible:ring-slate-200"
+                className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none transition focus:border-slate-300"
                 value={selectedGrade}
                 onChange={(e) => {
                   const g = Number(e.target.value);
@@ -600,7 +519,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
             <div>
               <label className="text-xs font-semibold text-slate-600">Search lessons</label>
               <input
-                className="mt-2 w-full rounded-2xl border border-slate-200/70 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:bg-white focus-visible:ring-2 focus-visible:ring-slate-200"
+                className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-slate-300"
                 placeholder={`Search Grade ${selectedGrade} lessons...`}
                 value={gradeSearch}
                 onChange={(e) => setGradeSearch(e.target.value)}
@@ -616,7 +535,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
             <div>
               <label className="text-xs font-semibold text-slate-600">Strand</label>
               <select
-                className="mt-2 w-full rounded-2xl border border-slate-200/70 bg-slate-50 px-3 py-2.5 text-sm font-semibold text-slate-900 outline-none transition focus:border-slate-300 focus:bg-white focus-visible:ring-2 focus-visible:ring-slate-200"
+                className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none transition focus:border-slate-300"
                 value={selectedStrand}
                 onChange={(e) => setSelectedStrand(e.target.value)}
               >
@@ -632,7 +551,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
             <div>
               <label className="text-xs font-semibold text-slate-600">Unit</label>
               <select
-                className="mt-2 w-full rounded-2xl border border-slate-200/70 bg-slate-50 px-3 py-2.5 text-sm font-semibold text-slate-900 outline-none transition focus:border-slate-300 focus:bg-white focus-visible:ring-2 focus-visible:ring-slate-200"
+                className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none transition focus:border-slate-300"
                 value={selectedUnitId}
                 onChange={(e) => {
                   const id = e.target.value;
@@ -699,10 +618,10 @@ export function LessonsClient({ tier }: { tier: Tier }) {
                         }
                       }}
                       className={
-                        "group w-full rounded-2xl border px-3 py-3 text-left transition hover:shadow-sm active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-200 " +
+                        "group w-full rounded-2xl border px-3 py-3 text-left transition " +
                         (active
-                          ? "border-slate-900 bg-slate-900 text-white shadow-sm"
-                          : "border-slate-200/70 bg-white text-slate-900 hover:border-slate-300")
+                          ? "border-slate-900 bg-slate-900 text-white"
+                          : "border-slate-200 bg-white text-slate-900 hover:border-slate-300")
                       }
                     >
                       <div className="flex items-center justify-between gap-2">
@@ -753,7 +672,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
 
         {/* Main */}
         <div className="space-y-6">
-          <div className="rounded-3xl border border-slate-200/70 bg-white/80 p-5 shadow-sm backdrop-blur">
+          <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
             <div className="text-xs font-semibold text-slate-500">
               {selectedStrand ? `${selectedStrand} • ` : ""}{selectedUnit ? `${selectedUnit.id}: ${selectedUnit.title}` : ""}
             </div>
@@ -766,7 +685,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
                 type="button"
                 onClick={() => setActiveTab("practice")}
                 className={
-                  "rounded-full px-4 py-2 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-200 " +
+                  "rounded-full px-4 py-2 text-sm font-semibold transition " +
                   (activeTab === "practice" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200")
                 }
               >
@@ -776,7 +695,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
                 type="button"
                 onClick={() => setActiveTab("unit_test")}
                 className={
-                  "rounded-full px-4 py-2 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-200 " +
+                  "rounded-full px-4 py-2 text-sm font-semibold transition " +
                   (activeTab === "unit_test" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200")
                 }
               >
@@ -786,7 +705,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
           </div>
 
           {activeTab === "unit_test" ? (
-            <div className="rounded-3xl border border-slate-200/70 bg-white/80 p-6 shadow-sm backdrop-blur">
+            <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
               <div className="text-lg font-semibold text-slate-900">Unit test</div>
               <div className="mt-2 text-sm text-slate-600">
                 Coming soon. This will contain a full assessment for the unit, with automatic grading.
@@ -795,7 +714,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
           ) : (
             <>
               {/* Video placeholder */}
-              <div className="rounded-3xl border border-slate-200/70 bg-white/80 p-6 shadow-sm backdrop-blur">
+              <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
                 <div className="text-sm font-semibold text-slate-900">Lesson video</div>
                 <div className="mt-3 rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-10 text-center text-sm text-slate-500">
                   Video player placeholder (wire this to your hosting later)
@@ -803,7 +722,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
               </div>
 
               {/* Practice */}
-              <div className="rounded-3xl border border-slate-200/70 bg-white/80 p-6 shadow-sm backdrop-blur">
+              <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="text-lg font-semibold text-slate-900">Practice</div>
@@ -814,7 +733,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
                   <button
                     type="button"
                     onClick={() => void loadNextQuestion()}
-                    className="rounded-full border border-slate-200/70 bg-white px-4 py-2 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-slate-50 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-200"
+                    className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-slate-50"
                     disabled={loadingQ}
                   >
                     Next question
@@ -833,7 +752,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
                       <div className="text-sm font-semibold text-slate-900"><RichText text={question.prompt} /></div>
                       <div className="mt-3 flex gap-2">
                         <input
-                          className="w-full rounded-2xl border border-slate-200/70 bg-slate-50 px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:bg-white focus-visible:ring-2 focus-visible:ring-slate-200"
+                          className="w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-slate-300"
                           placeholder={question.inputPlaceholder || "Type your answer…"}
                           value={userInput}
                           onChange={(e) => setUserInput(e.target.value)}
@@ -850,7 +769,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
                         />
                         <button
                           type="button"
-                          className="rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-200 disabled:bg-slate-300"
+                          className="rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:bg-slate-300"
                           disabled={!userInput.trim() || !!checked || isLessonLocked}
                           onClick={() => {
                             const ok = checkAnswer(question, userInput);
@@ -888,5 +807,3 @@ export function LessonsClient({ tier }: { tier: Tier }) {
     </div>
   );
 }
-
-export default LessonsClient;
