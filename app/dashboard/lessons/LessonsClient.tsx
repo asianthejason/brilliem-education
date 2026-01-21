@@ -89,7 +89,7 @@ function strandLabel(strand: string) {
   return strand;
 }
 
-export default function LessonsClient({ tier }: { tier: Tier }) {
+export function LessonsClient({ tier }: { tier: Tier }) {
   const { user, isLoaded } = useUser();
 
   const grades = useMemo(() => GRADES_7_TO_12, []);
@@ -393,9 +393,9 @@ export default function LessonsClient({ tier }: { tier: Tier }) {
 
   return (
     <div className="mx-auto w-full max-w-6xl px-4 pb-10 pt-6">
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[360px_1fr]">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[380px_1fr]">
         {/* Sidebar */}
-        <div className="sticky top-6 self-start rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="sticky top-6 self-start rounded-3xl border border-slate-200/70 bg-white/80 p-4 shadow-sm backdrop-blur">
           <div className="flex items-start justify-between gap-3">
             <div>
               <div className="text-base font-semibold text-slate-900">{sidebarTitle}</div>
@@ -411,7 +411,7 @@ export default function LessonsClient({ tier }: { tier: Tier }) {
             <div>
               <label className="text-xs font-semibold text-slate-600">Grade</label>
               <select
-                className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none transition focus:border-slate-300"
+                className="mt-2 w-full rounded-2xl border border-slate-200/70 bg-slate-50 px-3 py-2.5 text-sm font-semibold text-slate-900 outline-none transition focus:border-slate-300 focus:bg-white focus-visible:ring-2 focus-visible:ring-slate-200"
                 value={selectedGrade}
                 onChange={(e) => {
                   const g = Number(e.target.value);
@@ -434,7 +434,7 @@ export default function LessonsClient({ tier }: { tier: Tier }) {
             <div>
               <label className="text-xs font-semibold text-slate-600">Search lessons</label>
               <input
-                className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-slate-300"
+                className="mt-2 w-full rounded-2xl border border-slate-200/70 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:bg-white focus-visible:ring-2 focus-visible:ring-slate-200"
                 placeholder={`Search Grade ${selectedGrade} lessons...`}
                 value={gradeSearch}
                 onChange={(e) => setGradeSearch(e.target.value)}
@@ -450,7 +450,7 @@ export default function LessonsClient({ tier }: { tier: Tier }) {
             <div>
               <label className="text-xs font-semibold text-slate-600">Strand</label>
               <select
-                className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none transition focus:border-slate-300"
+                className="mt-2 w-full rounded-2xl border border-slate-200/70 bg-slate-50 px-3 py-2.5 text-sm font-semibold text-slate-900 outline-none transition focus:border-slate-300 focus:bg-white focus-visible:ring-2 focus-visible:ring-slate-200"
                 value={selectedStrand}
                 onChange={(e) => setSelectedStrand(e.target.value)}
               >
@@ -466,7 +466,7 @@ export default function LessonsClient({ tier }: { tier: Tier }) {
             <div>
               <label className="text-xs font-semibold text-slate-600">Unit</label>
               <select
-                className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none transition focus:border-slate-300"
+                className="mt-2 w-full rounded-2xl border border-slate-200/70 bg-slate-50 px-3 py-2.5 text-sm font-semibold text-slate-900 outline-none transition focus:border-slate-300 focus:bg-white focus-visible:ring-2 focus-visible:ring-slate-200"
                 value={selectedUnitId}
                 onChange={(e) => {
                   const id = e.target.value;
@@ -533,10 +533,10 @@ export default function LessonsClient({ tier }: { tier: Tier }) {
                         }
                       }}
                       className={
-                        "group w-full rounded-2xl border px-3 py-3 text-left transition " +
+                        "group w-full rounded-2xl border px-3 py-3 text-left transition hover:shadow-sm active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-200 " +
                         (active
-                          ? "border-slate-900 bg-slate-900 text-white"
-                          : "border-slate-200 bg-white text-slate-900 hover:border-slate-300")
+                          ? "border-slate-900 bg-slate-900 text-white shadow-sm"
+                          : "border-slate-200/70 bg-white text-slate-900 hover:border-slate-300")
                       }
                     >
                       <div className="flex items-center justify-between gap-2">
@@ -587,7 +587,7 @@ export default function LessonsClient({ tier }: { tier: Tier }) {
 
         {/* Main */}
         <div className="space-y-6">
-          <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="rounded-3xl border border-slate-200/70 bg-white/80 p-5 shadow-sm backdrop-blur">
             <div className="text-xs font-semibold text-slate-500">
               {selectedStrand ? `${selectedStrand} • ` : ""}{selectedUnit ? `${selectedUnit.id}: ${selectedUnit.title}` : ""}
             </div>
@@ -600,7 +600,7 @@ export default function LessonsClient({ tier }: { tier: Tier }) {
                 type="button"
                 onClick={() => setActiveTab("practice")}
                 className={
-                  "rounded-full px-4 py-2 text-sm font-semibold transition " +
+                  "rounded-full px-4 py-2 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-200 " +
                   (activeTab === "practice" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200")
                 }
               >
@@ -610,7 +610,7 @@ export default function LessonsClient({ tier }: { tier: Tier }) {
                 type="button"
                 onClick={() => setActiveTab("unit_test")}
                 className={
-                  "rounded-full px-4 py-2 text-sm font-semibold transition " +
+                  "rounded-full px-4 py-2 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-200 " +
                   (activeTab === "unit_test" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200")
                 }
               >
@@ -620,7 +620,7 @@ export default function LessonsClient({ tier }: { tier: Tier }) {
           </div>
 
           {activeTab === "unit_test" ? (
-            <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+            <div className="rounded-3xl border border-slate-200/70 bg-white/80 p-6 shadow-sm backdrop-blur">
               <div className="text-lg font-semibold text-slate-900">Unit test</div>
               <div className="mt-2 text-sm text-slate-600">
                 Coming soon. This will contain a full assessment for the unit, with automatic grading.
@@ -629,7 +629,7 @@ export default function LessonsClient({ tier }: { tier: Tier }) {
           ) : (
             <>
               {/* Video placeholder */}
-              <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+              <div className="rounded-3xl border border-slate-200/70 bg-white/80 p-6 shadow-sm backdrop-blur">
                 <div className="text-sm font-semibold text-slate-900">Lesson video</div>
                 <div className="mt-3 rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-10 text-center text-sm text-slate-500">
                   Video player placeholder (wire this to your hosting later)
@@ -637,7 +637,7 @@ export default function LessonsClient({ tier }: { tier: Tier }) {
               </div>
 
               {/* Practice */}
-              <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+              <div className="rounded-3xl border border-slate-200/70 bg-white/80 p-6 shadow-sm backdrop-blur">
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="text-lg font-semibold text-slate-900">Practice</div>
@@ -648,7 +648,7 @@ export default function LessonsClient({ tier }: { tier: Tier }) {
                   <button
                     type="button"
                     onClick={() => void loadNextQuestion()}
-                    className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-slate-50"
+                    className="rounded-full border border-slate-200/70 bg-white px-4 py-2 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-slate-50 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-200"
                     disabled={loadingQ}
                   >
                     Next question
@@ -667,7 +667,7 @@ export default function LessonsClient({ tier }: { tier: Tier }) {
                       <div className="text-sm font-semibold text-slate-900">{question.prompt}</div>
                       <div className="mt-3 flex gap-2">
                         <input
-                          className="w-full rounded-2xl border border-slate-200 px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-slate-300"
+                          className="w-full rounded-2xl border border-slate-200/70 bg-slate-50 px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:bg-white focus-visible:ring-2 focus-visible:ring-slate-200"
                           placeholder={question.inputPlaceholder || "Type your answer…"}
                           value={userInput}
                           onChange={(e) => setUserInput(e.target.value)}
@@ -684,7 +684,7 @@ export default function LessonsClient({ tier }: { tier: Tier }) {
                         />
                         <button
                           type="button"
-                          className="rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:bg-slate-300"
+                          className="rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-200 disabled:bg-slate-300"
                           disabled={!userInput.trim() || !!checked || isLessonLocked}
                           onClick={() => {
                             const ok = checkAnswer(question, userInput);
@@ -722,3 +722,5 @@ export default function LessonsClient({ tier }: { tier: Tier }) {
     </div>
   );
 }
+
+export default LessonsClient;

@@ -15,11 +15,9 @@ export default async function LessonsPage() {
   if (tier === "none") redirect("/dashboard");
 
   return (
-    <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+    <div className="rounded-3xl border border-slate-200 bg-white/80 p-6 shadow-sm backdrop-blur">
       <h1 className="text-xl font-bold text-slate-900">Lessons</h1>
-      <p className="mt-2 text-slate-600">
-        This is where the video lessons + practice questions will live.
-      </p>
+      <p className="mt-2 text-slate-600">Pick a grade, strand, unit, then practice.</p>
 
       {tier === "free" ? (
         <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
