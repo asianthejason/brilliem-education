@@ -174,7 +174,7 @@ function strandLabel(strand: string) {
   return strand;
 }
 
-export default function LessonsClient({ tier }: { tier: Tier }) {
+export function LessonsClient({ tier }: { tier: Tier }) {
   const { user, isLoaded } = useUser();
 
   const grades = useMemo(() => GRADES_7_TO_12, []);
@@ -807,3 +807,6 @@ export default function LessonsClient({ tier }: { tier: Tier }) {
     </div>
   );
 }
+
+export default LessonsClient;
+
