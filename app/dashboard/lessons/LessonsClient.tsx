@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useUser } from "@clerk/nextjs";
 import {
   GRADES_7_TO_12,
@@ -88,6 +88,172 @@ function strandLabel(strand: string) {
   // Pretty labels if you want them later.
   return strand;
 }
+
+function findClosing(delim: string, s: string, start: number) {
+  const idx = s.indexOf(delim, start);
+  return idx;
+}
+
+function renderInlineRich(text: string, keyPrefix: string): ReactNode[] {
+  const out: ReactNode[] = [];
+  let i = 0;
+  let k = 0;
+
+  const pushText = (t: string) => {
+    if (!t) return;
+    out.push(<span key={`${keyPrefix}-t-${k++}`}>{t}</span>);
+  };
+
+  while (i < text.length) {
+    // Code: `...`
+    if (text[i] === "`") {
+      const end = findClosing("`", text, i + 1);
+      if (end != -1) {
+        const content = text.slice(i + 1, end);
+        out.push(
+          <code
+            key={`${keyPrefix}-code-${k++}`}
+            className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[0.95em] text-slate-900"
+          >
+            {content}
+          </code>
+        );
+        i = end + 1;
+        continue;
+      }
+    }
+
+    // Display math: $$...$$
+    if (text.startsWith("$$", i)) {
+      const end = findClosing("$$", text, i + 2);
+      if (end != -1) {
+        const content = text.slice(i + 2, end);
+        out.push(
+          <span
+            key={`${keyPrefix}-mathblock-${k++}`}
+            className="inline-block rounded bg-slate-50 px-2 py-1 font-mono text-[0.95em] text-slate-900"
+          >
+            {content}
+          </span>
+        );
+        i = end + 2;
+        continue;
+      }
+    }
+
+    // Display math: \[..\]
+    if (text.startsWith("\[", i)) {
+      const end = findClosing("\\]", text, i + 2);
+      if (end != -1) {
+        const content = text.slice(i + 2, end);
+        out.push(
+          <span
+            key={`${keyPrefix}-mathblock2-${k++}`}
+            className="inline-block rounded bg-slate-50 px-2 py-1 font-mono text-[0.95em] text-slate-900"
+          >
+            {content}
+          </span>
+        );
+        i = end + 2;
+        continue;
+      }
+    }
+
+    // Inline math: \(...\)
+    if (text.startsWith("\(", i)) {
+      const end = findClosing("\\)", text, i + 2);
+      if (end != -1) {
+        const content = text.slice(i + 2, end);
+        out.push(
+          <span key={`${keyPrefix}-math-${k++}`} className="font-mono text-[0.95em] text-slate-900">
+            {content}
+          </span>
+        );
+        i = end + 2;
+        continue;
+      }
+    }
+
+    // Inline math: $...$
+    if (text[i] === "$" ) {
+      const end = findClosing("$", text, i + 1);
+      if (end != -1) {
+        const content = text.slice(i + 1, end);
+        out.push(
+          <span key={`${keyPrefix}-math2-${k++}`} className="font-mono text-[0.95em] text-slate-900">
+            {content}
+          </span>
+        );
+        i = end + 1;
+        continue;
+      }
+    }
+
+    // Bold: **...**
+    if (text.startsWith("**", i)) {
+      const end = findClosing("**", text, i + 2);
+      if (end != -1) {
+        const content = text.slice(i + 2, end);
+        out.push(
+          <strong key={`${keyPrefix}-b-${k++}`} className="font-bold text-slate-900">
+            {content}
+          </strong>
+        );
+        i = end + 2;
+        continue;
+      }
+    }
+
+    // Italic: *...*
+    if (text[i] === "*") {
+      const end = findClosing("*", text, i + 1);
+      if (end != -1) {
+        const content = text.slice(i + 1, end);
+        out.push(
+          <em key={`${keyPrefix}-i-${k++}`} className="italic">
+            {content}
+          </em>
+        );
+        i = end + 1;
+        continue;
+      }
+    }
+
+    // Plain text run until next special token
+    nexts = []
+    for needle in ("`", "$$", "\[", "\(", "$", "**", "*"):
+        j = text.find(needle, i)
+        if j != -1:
+            nexts.append(j)
+    nxt = min(nexts) if nexts else -1
+
+    if nxt == -1:
+      pushText(text[i:])
+      break
+    if nxt == i:
+      pushText(text[i])
+      i += 1
+    else:
+      pushText(text[i:nxt])
+      i = nxt
+
+  return out;
+}
+
+function RichText({ text }: { text: string }) {
+  const lines = (text || "").split("\n");
+  return (
+    <span className="whitespace-pre-wrap">
+      {lines.map((line, idx) => (
+        <span key={`rt-${idx}`}>
+          {renderInlineRich(line, `rt-${idx}`)}
+          {idx < lines.length - 1 ? <br /> : null}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 
 export function LessonsClient({ tier }: { tier: Tier }) {
   const { user, isLoaded } = useUser();
@@ -664,7 +830,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
                     <div className="text-sm text-slate-600">No question available.</div>
                   ) : (
                     <>
-                      <div className="text-sm font-semibold text-slate-900">{question.prompt}</div>
+                      <div className="text-sm font-semibold text-slate-900"><RichText text={question.prompt} /></div>
                       <div className="mt-3 flex gap-2">
                         <input
                           className="w-full rounded-2xl border border-slate-200/70 bg-slate-50 px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:bg-white focus-visible:ring-2 focus-visible:ring-slate-200"
@@ -702,7 +868,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
                           <div className="text-sm font-semibold text-slate-900">
                             {checked.correct ? "✅ Correct" : "❌ Not quite"}
                           </div>
-                          <div className="mt-2 text-sm text-slate-700">{question.reasoning}</div>
+                          <div className="mt-2 text-sm text-slate-700"><RichText text={question.reasoning} /></div>
                         </div>
                       )}
 
