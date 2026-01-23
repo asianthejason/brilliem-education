@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useUser } from "@clerk/nextjs";
 import {
   GRADES_7_TO_12,
@@ -67,39 +67,61 @@ function tokenizeRichText(input: string): RichSeg[] {
     segs.push({ kind: "text", content: input.slice(last) });
   }
 
-  return explodeFractions(segs);
+  return segs;
 }
 
-function explodeFractions(segs: RichSeg[]): RichSeg[] {
-  const out: RichSeg[] = [];
-  // Render simple numeric fractions like 1/4 as stacked fractions (without needing LaTeX).
-  // We intentionally cap to 1–3 digits to avoid accidentally converting years like 2026/01.
-  const fracRe = /(\b\d{1,3})\s*\/\s*(\d{1,3}\b)/g;
 
-  for (const s of segs) {
-    if (s.kind !== "text") {
-      out.push(s);
-      continue;
-    }
-
-    const input = s.content;
-    let last = 0;
-    let m: RegExpExecArray | null;
-
-    while ((m = fracRe.exec(input)) !== null) {
-      if (m.index > last) {
-        out.push({ kind: "text", content: input.slice(last, m.index) });
+function Fraction({
+  num,
+  den,
+  className,
+}: {
+  num: string;
+  den: string;
+  className?: string;
+}) {
+  return (
+    <span
+      className={
+        "mx-0.5 inline-flex flex-col items-center justify-center align-middle leading-none " +
+        (className || "")
       }
-      out.push({ kind: "frac", num: m[1].trim(), den: m[2].trim(), raw: m[0] });
-      last = m.index + m[0].length;
+      aria-label={`${num} over ${den}`}
+    >
+      <span className="text-[0.9em] leading-none">{num}</span>
+      <span className="my-[1px] h-[1px] w-full bg-slate-800/60" />
+      <span className="text-[0.9em] leading-none">{den}</span>
+    </span>
+  );
+}
+
+function renderTextWithFractions(text: string, keyPrefix: string) {
+  // Match simple numeric fractions like 1/4, 12/25, 3 / 8 (1–3 digits each side).
+  // Avoids dates like 2026/01 (4 digits) and avoids matching inside larger numbers.
+  const fracRe = /(?<!\d)(\d{1,3})\s*\/\s*(\d{1,3})(?!\d)/g;
+
+  const parts: Array<ReactNode> = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+
+  while ((m = fracRe.exec(text)) !== null) {
+    const start = m.index ?? 0;
+    const end = start + m[0].length;
+
+    if (start > last) {
+      parts.push(<span key={`${keyPrefix}-t-${last}`}>{text.slice(last, start)}</span>);
     }
 
-    if (last < input.length) {
-      out.push({ kind: "text", content: input.slice(last) });
-    }
+    parts.push(<Fraction key={`${keyPrefix}-f-${start}`} num={m[1]} den={m[2]} />);
+
+    last = end;
   }
 
-  return out;
+  if (last < text.length) {
+    parts.push(<span key={`${keyPrefix}-t-${last}`}>{text.slice(last)}</span>);
+  }
+
+  return parts;
 }
 
 function RichText({
@@ -114,8 +136,8 @@ function RichText({
   return (
     <span className={className}>
       {segs.map((s, idx) => {
-        if (s.kind === "bold") return <strong key={idx}>{s.content}</strong>;
-        if (s.kind === "italic") return <em key={idx}>{s.content}</em>;
+        if (s.kind === "bold") return <strong key={idx}>{renderTextWithFractions(s.content, `b-${idx}`)}</strong>;
+        if (s.kind === "italic") return <em key={idx}>{renderTextWithFractions(s.content, `i-${idx}`)}</em>;
         if (s.kind === "code")
           return (
             <code
@@ -134,19 +156,7 @@ function RichText({
               {s.content}
             </span>
           );
-                if (s.kind === "frac")
-          return (
-            <span
-              key={idx}
-              className="mx-0.5 inline-flex flex-col items-center justify-center align-middle font-semibold tabular-nums leading-none"
-              aria-label={s.raw}
-            >
-              <span className="text-[0.8em]">{s.num}</span>
-              <span className="h-px w-full bg-slate-400" />
-              <span className="text-[0.8em]">{s.den}</span>
-            </span>
-          );
-        return <span key={idx}>{s.content}</span>;
+        return <span key={idx}>{renderTextWithFractions(s.content, `t-${idx}`)}</span>;
       })}
     </span>
   );
