@@ -629,7 +629,7 @@ useEffect(() => {
           {sidebarCollapsed ? (
             <div className="flex h-full min-h-[420px] items-center justify-center">
               <div className="select-none text-xs font-semibold text-slate-500 [writing-mode:vertical-rl] rotate-180">
-                Filters
+                Lesson Selection
               </div>
             </div>
           ) : (
