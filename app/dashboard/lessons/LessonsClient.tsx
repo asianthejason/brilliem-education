@@ -67,7 +67,39 @@ function tokenizeRichText(input: string): RichSeg[] {
     segs.push({ kind: "text", content: input.slice(last) });
   }
 
-  return segs;
+  return explodeFractions(segs);
+}
+
+function explodeFractions(segs: RichSeg[]): RichSeg[] {
+  const out: RichSeg[] = [];
+  // Render simple numeric fractions like 1/4 as stacked fractions (without needing LaTeX).
+  // We intentionally cap to 1–3 digits to avoid accidentally converting years like 2026/01.
+  const fracRe = /(\b\d{1,3})\s*\/\s*(\d{1,3}\b)/g;
+
+  for (const s of segs) {
+    if (s.kind !== "text") {
+      out.push(s);
+      continue;
+    }
+
+    const input = s.content;
+    let last = 0;
+    let m: RegExpExecArray | null;
+
+    while ((m = fracRe.exec(input)) !== null) {
+      if (m.index > last) {
+        out.push({ kind: "text", content: input.slice(last, m.index) });
+      }
+      out.push({ kind: "frac", num: m[1].trim(), den: m[2].trim(), raw: m[0] });
+      last = m.index + m[0].length;
+    }
+
+    if (last < input.length) {
+      out.push({ kind: "text", content: input.slice(last) });
+    }
+  }
+
+  return out;
 }
 
 function RichText({
@@ -100,6 +132,18 @@ function RichText({
               className="mx-0.5 rounded-md border border-slate-200 bg-white px-1 py-0.5 font-mono text-[0.95em] text-slate-900"
             >
               {s.content}
+            </span>
+          );
+                if (s.kind === "frac")
+          return (
+            <span
+              key={idx}
+              className="mx-0.5 inline-flex flex-col items-center justify-center align-middle font-semibold tabular-nums leading-none"
+              aria-label={s.raw}
+            >
+              <span className="text-[0.8em]">{s.num}</span>
+              <span className="h-px w-full bg-slate-400" />
+              <span className="text-[0.8em]">{s.den}</span>
             </span>
           );
         return <span key={idx}>{s.content}</span>;
