@@ -233,6 +233,15 @@ function unitCode(unitId: string) {
   return unitId.replace(/^g\d+-/i, "").toUpperCase();
 }
 
+function stripLeadingUnitCode(title: string, code: string) {
+  // Many unit titles already include the code prefix, e.g. "N1: Divisibility & factors".
+  // If we prepend "N1:" again in the UI, it becomes "N1: N1: ...", so strip it once.
+  const re = new RegExp(`^\\s*${code}\\s*:\\s*`, "i");
+  const cleaned = title.replace(re, "").trim();
+  return cleaned.length ? cleaned : title;
+}
+
+
 export function LessonsClient({ tier }: { tier: Tier }) {
   const { user, isLoaded } = useUser();
 
@@ -622,7 +631,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
               >
                 {unitsInSelectedStrand.map((u) => (
                   <option key={u.id} value={u.id}>
-                    {unitCode(u.id)}: {u.title}
+                    {unitCode(u.id)}: {stripLeadingUnitCode(u.title, unitCode(u.id))}
                   </option>
                 ))}
               </select>
@@ -733,7 +742,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
         <div className="space-y-6">
           <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
             <div className="text-xs font-semibold text-slate-500">
-              {selectedStrand ? `${selectedStrand} • ` : ""}{selectedUnit ? `${unitCode(selectedUnit.id)}: ${selectedUnit.title}` : ""}
+              {selectedStrand ? `${selectedStrand} • ` : ""}{selectedUnit ? `${unitCode(selectedUnit.id)}: ${stripLeadingUnitCode(selectedUnit.title, unitCode(selectedUnit.id))}` : ""}
             </div>
             <div className="mt-1 text-xl font-semibold text-slate-900">
               {selectedLesson?.title || "Select a lesson"}
