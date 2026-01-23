@@ -565,45 +565,45 @@ useEffect(() => {
   return (
     <div className="mx-auto w-full max-w-6xl px-4 pb-10 pt-6">
 
-<div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-  <div>
-    <h1 className="text-xl font-bold text-slate-900">Lessons</h1>
-    <p className="mt-2 text-slate-600">Pick a grade, strand, unit, then practice.</p>
+<div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+  <div className="text-xs font-semibold text-slate-500">
+    {selectedStrand ? `${selectedStrand} • ` : ""}{selectedUnit
+      ? `${unitCode(selectedUnit.id)}: ${stripLeadingUnitCode(
+          selectedUnit.title,
+          unitCode(selectedUnit.id)
+        )}`
+      : ""}
   </div>
 
-  {/* Lesson header (moved beside page title) */}
-  <div className="w-full lg:max-w-[520px]">
-    <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div className="text-xs font-semibold text-slate-500">
-        {selectedStrand ? `${selectedStrand} • ` : ""}{selectedUnit ? `${unitCode(selectedUnit.id)}: ${stripLeadingUnitCode(selectedUnit.title, unitCode(selectedUnit.id))}` : ""}
-      </div>
-      <div className="mt-1 text-xl font-semibold text-slate-900">
-        {selectedLesson?.title || "Select a lesson"}
-      </div>
+  <div className="mt-1 text-xl font-semibold text-slate-900">
+    {selectedLesson?.title || "Select a lesson"}
+  </div>
 
-      <div className="mt-4 flex gap-2">
-        <button
-          type="button"
-          onClick={() => setActiveTab("practice")}
-          className={
-            "rounded-full px-4 py-2 text-sm font-semibold transition " +
-            (activeTab === "practice" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200")
-          }
-        >
-          Video + Practice
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab("unit_test")}
-          className={
-            "rounded-full px-4 py-2 text-sm font-semibold transition " +
-            (activeTab === "unit_test" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200")
-          }
-        >
-          Unit Test
-        </button>
-      </div>
-    </div>
+  <div className="mt-4 flex flex-wrap gap-2">
+    <button
+      type="button"
+      onClick={() => setActiveTab("practice")}
+      className={
+        "rounded-full px-4 py-2 text-sm font-semibold transition " +
+        (activeTab === "practice"
+          ? "bg-slate-900 text-white"
+          : "bg-slate-100 text-slate-700 hover:bg-slate-200")
+      }
+    >
+      Video + Practice
+    </button>
+    <button
+      type="button"
+      onClick={() => setActiveTab("unit_test")}
+      className={
+        "rounded-full px-4 py-2 text-sm font-semibold transition " +
+        (activeTab === "unit_test"
+          ? "bg-slate-900 text-white"
+          : "bg-slate-100 text-slate-700 hover:bg-slate-200")
+      }
+    >
+      Unit Test
+    </button>
   </div>
 </div>
 
