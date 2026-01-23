@@ -127,7 +127,7 @@ export async function POST(req: Request) {
         reasoning: { type: "string", minLength: 10, maxLength: 900 },
         inputPlaceholder: { type: "string", minLength: 0, maxLength: 60 },
       },
-      required: ["prompt", "answer", "reasoning"],
+      required: ["prompt", "answer", "acceptedAnswers", "reasoning", "inputPlaceholder"],
     };
 
     const model = process.env.OPENAI_LESSON_QUESTION_MODEL || "gpt-4.1-mini";
