@@ -546,13 +546,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[360px_1fr]">
         {/* Sidebar */}
         <div className="sticky top-6 self-start rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="flex items-center justify-end">
-            <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
-              % is calculated using last 20 responses.
-            </div>
-          </div>
-
-          <div className="mt-4 space-y-4">
+<div className="mt-4 space-y-4">
             {/* Grade */}
             <div>
               <label className="text-xs font-semibold text-slate-600">Grade</label>
@@ -632,8 +626,11 @@ export function LessonsClient({ tier }: { tier: Tier }) {
 
             {/* Lessons list */}
             <div>
-              <div className="flex items-center justify-between">
-                <div className="text-xs font-semibold text-slate-600">Lessons</div>
+              <div className="flex items-start justify-between">
+                <div className="flex flex-col">
+                  <div className="text-xs font-semibold text-slate-600">Lessons</div>
+                  <div className="mt-0.5 text-[11px] text-slate-500">% is calculated using last 20 responses.</div>
+                </div>
                 {!gradeSearch.trim() && (
                   <div className="text-xs text-slate-500">
                     {selectedUnitLessons.length}/{selectedUnitLessons.length}
