@@ -228,6 +228,11 @@ function strandLabel(strand: string) {
   return strand;
 }
 
+function unitCode(unitId: string) {
+  // e.g. "g7-n1" -> "N1", "g7-ss1" -> "SS1"
+  return unitId.replace(/^g\d+-/i, "").toUpperCase();
+}
+
 export function LessonsClient({ tier }: { tier: Tier }) {
   const { user, isLoaded } = useUser();
 
@@ -617,7 +622,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
               >
                 {unitsInSelectedStrand.map((u) => (
                   <option key={u.id} value={u.id}>
-                    {u.id}: {u.title}
+                    {unitCode(u.id)}: {u.title}
                   </option>
                 ))}
               </select>
@@ -728,7 +733,7 @@ export function LessonsClient({ tier }: { tier: Tier }) {
         <div className="space-y-6">
           <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
             <div className="text-xs font-semibold text-slate-500">
-              {selectedStrand ? `${selectedStrand} • ` : ""}{selectedUnit ? `${selectedUnit.id}: ${selectedUnit.title}` : ""}
+              {selectedStrand ? `${selectedStrand} • ` : ""}{selectedUnit ? `${unitCode(selectedUnit.id)}: ${selectedUnit.title}` : ""}
             </div>
             <div className="mt-1 text-xl font-semibold text-slate-900">
               {selectedLesson?.title || "Select a lesson"}
