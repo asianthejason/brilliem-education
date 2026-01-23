@@ -541,21 +541,14 @@ export function LessonsClient({ tier }: { tier: Tier }) {
     const idx = selectedUnit.lessons.findIndex((l) => l.id === selectedLessonId);
     return !isLessonUnlocked({ tier, unit: selectedUnit, lessonIndex: Math.max(0, idx) });
   }, [selectedLessonId, selectedUnit, tier]);
-
-  const sidebarTitle = `Lessons`;
-
   return (
     <div className="mx-auto w-full max-w-6xl px-4 pb-10 pt-6">
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[360px_1fr]">
         {/* Sidebar */}
         <div className="sticky top-6 self-start rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <div className="text-base font-semibold text-slate-900">{sidebarTitle}</div>
-              <div className="mt-0.5 text-xs text-slate-500">Pick grade → strand → unit, or search the whole grade.</div>
-            </div>
+          <div className="flex items-center justify-end">
             <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
-              Score = last 20
+              % is calculated using last 20 responses.
             </div>
           </div>
 

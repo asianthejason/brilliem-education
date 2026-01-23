@@ -19,20 +19,6 @@ export default async function LessonsPage() {
       <h1 className="text-xl font-bold text-slate-900">Lessons</h1>
       <p className="mt-2 text-slate-600">Pick a grade, strand, unit, then practice.</p>
 
-      {tier === "free" ? (
-        <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-          <div className="font-semibold">Free tier preview</div>
-          <div className="mt-1">
-            You’ll have access to the <span className="font-semibold">first lesson in every unit</span> once lessons are added.
-          </div>
-        </div>
-      ) : (
-        <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
-          <div className="font-semibold">Unlimited lessons</div>
-          <div className="mt-1">Your plan includes full access to all lessons.</div>
-        </div>
-      )}
-
       <div className="mt-6">
         <LessonsClient tier={tier} />
       </div>
