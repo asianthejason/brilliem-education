@@ -313,6 +313,27 @@ export function LessonsClient({ tier }: { tier: Tier }) {
   // Grade-wide search (under Grade dropdown)
   const [gradeSearch, setGradeSearch] = useState<string>("");
 
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+// Sidebar collapse should only apply on large screens; auto-expand on small screens.
+useEffect(() => {
+  if (typeof window === "undefined") return;
+  const mq = window.matchMedia("(min-width: 1024px)");
+  const sync = () => {
+    if (!mq.matches) setSidebarCollapsed(false);
+  };
+  sync();
+  // Safari < 14 doesn't support addEventListener on MediaQueryList
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const mql: any = mq;
+  if (mql.addEventListener) mql.addEventListener("change", sync);
+  else if (mql.addListener) mql.addListener(sync);
+  return () => {
+    if (mql.removeEventListener) mql.removeEventListener("change", sync);
+    else if (mql.removeListener) mql.removeListener(sync);
+  };
+}, []);
+
   const selectedUnit = useMemo<UnitRef | null>(() => {
     return (
       selectedGradeObj.units.find((u) => u.id === selectedUnitId) ||
@@ -543,10 +564,77 @@ export function LessonsClient({ tier }: { tier: Tier }) {
   }, [selectedLessonId, selectedUnit, tier]);
   return (
     <div className="mx-auto w-full max-w-6xl px-4 pb-10 pt-6">
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[360px_1fr]">
+
+<div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+  <div>
+    <h1 className="text-xl font-bold text-slate-900">Lessons</h1>
+    <p className="mt-2 text-slate-600">Pick a grade, strand, unit, then practice.</p>
+  </div>
+
+  {/* Lesson header (moved beside page title) */}
+  <div className="w-full lg:max-w-[520px]">
+    <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="text-xs font-semibold text-slate-500">
+        {selectedStrand ? `${selectedStrand} • ` : ""}{selectedUnit ? `${unitCode(selectedUnit.id)}: ${stripLeadingUnitCode(selectedUnit.title, unitCode(selectedUnit.id))}` : ""}
+      </div>
+      <div className="mt-1 text-xl font-semibold text-slate-900">
+        {selectedLesson?.title || "Select a lesson"}
+      </div>
+
+      <div className="mt-4 flex gap-2">
+        <button
+          type="button"
+          onClick={() => setActiveTab("practice")}
+          className={
+            "rounded-full px-4 py-2 text-sm font-semibold transition " +
+            (activeTab === "practice" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200")
+          }
+        >
+          Video + Practice
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab("unit_test")}
+          className={
+            "rounded-full px-4 py-2 text-sm font-semibold transition " +
+            (activeTab === "unit_test" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200")
+          }
+        >
+          Unit Test
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div
+  className={
+    "mt-6 grid grid-cols-1 gap-6 " +
+    (sidebarCollapsed ? "lg:grid-cols-[64px_1fr]" : "lg:grid-cols-[360px_1fr]")
+  }
+>
         {/* Sidebar */}
-        <div className="sticky top-6 self-start rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-<div className="mt-4 space-y-4">
+        <div className={"sticky top-6 self-start rounded-3xl border border-slate-200 bg-white shadow-sm " + (sidebarCollapsed ? "p-2" : "p-4")}>
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setSidebarCollapsed((v) => !v)}
+              className="absolute right-0 top-0 rounded-full border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
+              aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            >
+              {sidebarCollapsed ? "›" : "‹"}
+            </button>
+          </div>
+
+          {sidebarCollapsed ? (
+            <div className="flex h-full min-h-[420px] items-center justify-center">
+              <div className="select-none text-xs font-semibold text-slate-500 [writing-mode:vertical-rl]">
+                Filters
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="mt-4 space-y-4">
             {/* Grade */}
             <div>
               <label className="text-xs font-semibold text-slate-600">Grade</label>
@@ -726,42 +814,12 @@ export function LessonsClient({ tier }: { tier: Tier }) {
           <div className="mt-4 text-[11px] leading-relaxed text-slate-500">
             Progress syncs to your account. Last saved {lastSavedAtRef.current ? `${Math.max(1, Math.round((Date.now() - lastSavedAtRef.current) / 1000))}s ago` : "soon"}.
           </div>
+            </>
+          )}
         </div>
 
         {/* Main */}
         <div className="space-y-6">
-          <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="text-xs font-semibold text-slate-500">
-              {selectedStrand ? `${selectedStrand} • ` : ""}{selectedUnit ? `${unitCode(selectedUnit.id)}: ${stripLeadingUnitCode(selectedUnit.title, unitCode(selectedUnit.id))}` : ""}
-            </div>
-            <div className="mt-1 text-xl font-semibold text-slate-900">
-              {selectedLesson?.title || "Select a lesson"}
-            </div>
-
-            <div className="mt-4 flex gap-2">
-              <button
-                type="button"
-                onClick={() => setActiveTab("practice")}
-                className={
-                  "rounded-full px-4 py-2 text-sm font-semibold transition " +
-                  (activeTab === "practice" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200")
-                }
-              >
-                Video + Practice
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab("unit_test")}
-                className={
-                  "rounded-full px-4 py-2 text-sm font-semibold transition " +
-                  (activeTab === "unit_test" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200")
-                }
-              >
-                Unit Test
-              </button>
-            </div>
-          </div>
-
           {activeTab === "unit_test" ? (
             <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
               <div className="text-lg font-semibold text-slate-900">Unit test</div>
