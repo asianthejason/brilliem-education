@@ -179,8 +179,9 @@ export default function HomePage() {
           <div className="absolute right-[-140px] top-[360px] h-[360px] w-[360px] rounded-full bg-gradient-to-br from-red-500 to-rose-600 opacity-10 blur-3xl" />
         </div>
 
-        <div className="mx-auto max-w-6xl px-4 py-16 md:py-24">
-          <div className="grid items-center gap-10 md:grid-cols-2">
+        <div className="w-full border-b border-slate-200/60 bg-white/60 backdrop-blur">
+          <div className="mx-auto max-w-6xl px-4 py-16 md:py-24">
+            <div className="grid items-center gap-10 md:grid-cols-2">
             <div>
               <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700">
                 <span className="inline-flex gap-1.5">
@@ -192,9 +193,9 @@ export default function HomePage() {
               </div>
 
               <h1 className="mt-5 text-4xl font-bold tracking-tight text-slate-900 md:text-5xl">
-                The “full support” math program.
-                <span className="block text-slate-900">
-                  Clear lessons, unlimited practice, real progress.
+                Ace Alberta Math
+                <span className="mt-2 block text-xl font-semibold tracking-normal text-slate-700 md:text-2xl">
+                  Clear lessons | Unlimited practices | Real progress
                 </span>
               </h1>
 
@@ -360,6 +361,7 @@ export default function HomePage() {
                 </div>
               </div>
             </div>
+          </div>
           </div>
         </div>
       </section>
