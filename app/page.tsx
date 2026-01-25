@@ -1,4 +1,5 @@
 import Link from "next/link";
+import type { ReactNode } from "react";
 
 
 
@@ -72,7 +73,7 @@ function Card({
   title: string;
   desc: string;
   accent: string; // gradient classes
-  icon: React.ReactNode;
+  icon: ReactNode;
 }) {
   return (
     <div className="group relative overflow-hidden rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -296,7 +297,7 @@ export default function HomePage() {
                 </div>
               </div>
             </div>
-          </div>          </div>
+          </div>
         </div>
       </section>
 
