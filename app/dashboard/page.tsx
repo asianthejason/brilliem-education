@@ -1,14 +1,8 @@
 "use client";
 
-import Link from "next/link";
+import { useEffect, useMemo, useState } from "react";
 import { useUser } from "@clerk/nextjs";
-
-import {
-  GRADES_7_TO_12,
-  type GradeRef,
-  type LessonRef,
-  type UnitRef,
-} from "@/lib/gradeCatalog";
+import { GRADES_7_TO_12, type GradeRef, type UnitRef } from "@/lib/gradeCatalog";
 
 type Attempt = { correct: boolean; ts: number };
 
@@ -32,7 +26,6 @@ function normalizeProgress(raw: unknown): PracticeProgress {
   if (!isObject(raw)) return empty;
 
   const attemptsByLesson: Record<string, Attempt[]> = {};
-
   if (isObject(raw.attemptsByLesson)) {
     for (const [lessonId, attempts] of Object.entries(raw.attemptsByLesson)) {
       if (!Array.isArray(attempts)) continue;
@@ -59,98 +52,189 @@ function pctFromAttempts(attempts: Attempt[]): number | null {
   return Math.round((correct / 20) * 100);
 }
 
-function avgRounded(values: number[]) {
-  if (!values.length) return 0;
-  return Math.round(values.reduce((a, b) => a + b, 0) / values.length);
+function unitCode(unitId: string) {
+  return unitId.replace(/^g\d+-/i, "").toUpperCase();
 }
 
-function percentBadgeClass(pct: number) {
-  if (pct >= 85) return "bg-emerald-50 text-emerald-700 border-emerald-200";
-  if (pct >= 70) return "bg-sky-50 text-sky-700 border-sky-200";
-  if (pct >= 50) return "bg-amber-50 text-amber-700 border-amber-200";
-  return "bg-rose-50 text-rose-700 border-rose-200";
+function stripLeadingUnitCode(title: string, code: string) {
+  const re = new RegExp(`^\\s*${code}\\s*:\\s*`, "i");
+  const cleaned = title.replace(re, "").trim();
+  return cleaned.length ? cleaned : title;
 }
 
-type LessonRow = { lesson: LessonRef; pct: number };
-type UnitRow = {
+function clampPct(p: number) {
+  if (Number.isNaN(p)) return 0;
+  return Math.max(0, Math.min(100, Math.round(p)));
+}
+
+function scoreChipClass(pct: number) {
+  const p = clampPct(pct);
+  if (p >= 85) return "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200";
+  if (p >= 70) return "bg-sky-50 text-sky-700 ring-1 ring-sky-200";
+  if (p >= 50) return "bg-amber-50 text-amber-800 ring-1 ring-amber-200";
+  return "bg-rose-50 text-rose-700 ring-1 ring-rose-200";
+}
+
+type LessonStats = {
+  lessonId: string;
+  pct: number | null; // null = no attempts yet
+};
+
+type UnitStats = {
   unit: UnitRef;
-  unitPct: number;
-  activeLessons: LessonRow[];
-  isActive: boolean;
+  unitPct: number; // includes unattempted lessons as 0%
+  startedLessons: number;
+  lessons: LessonStats[];
+  hasActivity: boolean;
 };
-type StrandRow = {
+
+type StrandStats = {
   strand: string;
-  strandPct: number;
-  activeUnits: UnitRow[];
-  isActive: boolean;
+  strandPct: number; // includes unstarted units as 0%
+  startedUnits: number;
+  totalUnits: number;
+  units: UnitStats[];
+  hasActivity: boolean;
 };
-type GradeRow = {
+
+type GradeStats = {
   grade: GradeRef;
-  gradePct: number;
-  activeStrands: StrandRow[];
-  isActive: boolean;
+  gradePct: number; // includes unstarted strands as 0%
+  startedStrands: number;
+  totalStrands: number;
+  strands: StrandStats[];
+  hasActivity: boolean;
 };
 
-function buildDashboardRows(grades: GradeRef[], progress: PracticeProgress): GradeRow[] {
-  const lessonPct = (lessonId: string) =>
-    pctFromAttempts(progress.attemptsByLesson[lessonId] || []);
+function computeUnitStats(unit: UnitRef, lessonPctById: Record<string, number | null>): UnitStats {
+  const lessons: LessonStats[] = unit.lessons.map((l) => ({
+    lessonId: l.id,
+    pct: lessonPctById[l.id] ?? null,
+  }));
 
-  return grades
-    .map((g): GradeRow => {
-      // Group units by strand (keep a deterministic order).
-      const strandNames = Array.from(new Set(g.units.map((u) => u.strand))).sort((a, b) =>
-        a.localeCompare(b)
-      );
+  const startedLessons = lessons.filter((l) => l.pct !== null).length;
+  const hasActivity = startedLessons > 0;
 
-      const strands: StrandRow[] = strandNames.map((strandName) => {
-        const unitsInStrand = g.units.filter((u) => u.strand === strandName);
+  const sum = lessons.reduce((acc, l) => acc + (l.pct ?? 0), 0);
+  const unitPct = unit.lessons.length ? Math.round(sum / unit.lessons.length) : 0;
 
-        const unitRows: UnitRow[] = unitsInStrand.map((unit) => {
-          const activeLessons: LessonRow[] = unit.lessons
-            .map((lesson) => {
-              const pct = lessonPct(lesson.id);
-              return pct === null ? null : { lesson, pct };
-            })
-            .filter(Boolean) as LessonRow[];
+  return {
+    unit,
+    unitPct,
+    startedLessons,
+    lessons,
+    hasActivity,
+  };
+}
 
-          const allLessonPctsForAvg = unit.lessons.map((l) => lessonPct(l.id) ?? 0);
-          const unitPct = avgRounded(allLessonPctsForAvg);
+function computeGradeStats(grade: GradeRef, lessonPctById: Record<string, number | null>): GradeStats {
+  const strandMap = new Map<string, UnitRef[]>();
+  for (const u of grade.units) {
+    strandMap.set(u.strand, [...(strandMap.get(u.strand) || []), u]);
+  }
 
-          return {
-            unit,
-            unitPct,
-            activeLessons,
-            isActive: activeLessons.length > 0,
-          };
-        });
+  const strandNames = Array.from(strandMap.keys()).sort((a, b) => a.localeCompare(b));
 
-        const strandPct = avgRounded(unitRows.map((u) => u.unitPct));
-        const activeUnits = unitRows.filter((u) => u.isActive);
+  const strands: StrandStats[] = strandNames.map((strand) => {
+    const units = (strandMap.get(strand) || []).slice();
+    const unitStatsAll = units.map((u) => computeUnitStats(u, lessonPctById));
 
-        return {
-          strand: strandName,
-          strandPct,
-          activeUnits,
-          isActive: activeUnits.length > 0,
-        };
-      });
+    const startedUnits = unitStatsAll.filter((u) => u.hasActivity).length;
+    const hasActivity = startedUnits > 0;
 
-      const gradePct = avgRounded(strands.map((s) => s.strandPct));
-      const activeStrands = strands.filter((s) => s.isActive);
-      const isActive = activeStrands.length > 0;
+    // Strand % averages ALL units in the strand (unstarted units count as 0%).
+    const sum = unitStatsAll.reduce((acc, u) => acc + (u.hasActivity ? u.unitPct : 0), 0);
+    const strandPct = unitStatsAll.length ? Math.round(sum / unitStatsAll.length) : 0;
 
-      return {
-        grade: g,
-        gradePct,
-        activeStrands,
-        isActive,
-      };
-    })
-    .filter((g) => g.isActive);
+    return {
+      strand,
+      strandPct,
+      startedUnits,
+      totalUnits: unitStatsAll.length,
+      units: unitStatsAll,
+      hasActivity,
+    };
+  });
+
+  const startedStrands = strands.filter((s) => s.hasActivity).length;
+  const hasActivity = startedStrands > 0;
+
+  // Grade % averages ALL strands in the grade (unstarted strands count as 0%).
+  const sum = strands.reduce((acc, s) => acc + (s.hasActivity ? s.strandPct : 0), 0);
+  const gradePct = strands.length ? Math.round(sum / strands.length) : 0;
+
+  return {
+    grade,
+    gradePct,
+    startedStrands,
+    totalStrands: strands.length,
+    strands,
+    hasActivity,
+  };
+}
+
+function ProgressBar({ pct }: { pct: number }) {
+  const p = clampPct(pct);
+  return (
+    <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100 ring-1 ring-slate-200">
+      <div className="h-full rounded-full bg-slate-900" style={{ width: `${p}%` }} />
+    </div>
+  );
 }
 
 export default function DashboardPage() {
   const { user, isLoaded } = useUser();
+
+  const [openStrands, setOpenStrands] = useState<Record<string, boolean>>({});
+  const [openUnits, setOpenUnits] = useState<Record<string, boolean>>({});
+
+  const progress = useMemo(() => {
+    const raw = (user?.unsafeMetadata as any)?.practiceProgress;
+    return normalizeProgress(raw);
+  }, [user]);
+
+  const lastUpdated = useMemo(() => {
+    try {
+      return new Date(progress.updatedAt).toLocaleString();
+    } catch {
+      return "";
+    }
+  }, [progress.updatedAt]);
+
+  const lessonPctById = useMemo(() => {
+    const out: Record<string, number | null> = {};
+    for (const [lessonId, attempts] of Object.entries(progress.attemptsByLesson || {})) {
+      out[lessonId] = pctFromAttempts(attempts || []);
+    }
+    return out;
+  }, [progress.attemptsByLesson]);
+
+  const gradeStats = useMemo(() => {
+    const stats = GRADES_7_TO_12.map((g) => computeGradeStats(g, lessonPctById));
+    return stats.filter((g) => g.hasActivity && g.grade.units.length > 0);
+  }, [lessonPctById]);
+
+  // Keep open state stable but avoid keys hanging around forever.
+  useEffect(() => {
+    const strandKeys = new Set<string>();
+    const unitKeys = new Set<string>();
+    for (const g of gradeStats) {
+      for (const s of g.strands) {
+        strandKeys.add(`${g.grade.grade}::${s.strand}`);
+        for (const u of s.units) unitKeys.add(u.unit.id);
+      }
+    }
+    setOpenStrands((prev) => {
+      const next: Record<string, boolean> = {};
+      for (const k of strandKeys) if (prev[k]) next[k] = true;
+      return next;
+    });
+    setOpenUnits((prev) => {
+      const next: Record<string, boolean> = {};
+      for (const k of unitKeys) if (prev[k]) next[k] = true;
+      return next;
+    });
+  }, [gradeStats]);
 
   if (!isLoaded) {
     return (
@@ -160,148 +244,220 @@ export default function DashboardPage() {
     );
   }
 
-  const raw = (user?.unsafeMetadata as any)?.practiceProgress;
-  const progress = normalizeProgress(raw);
-  const rows = buildDashboardRows(GRADES_7_TO_12, progress);
-  const hasAnyProgress = rows.length > 0;
+  const empty = gradeStats.length === 0;
 
   return (
     <div className="grid gap-6">
+      {/* Header */}
       <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
         <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-slate-900">Your Dashboard</h1>
+            <h1 className="text-2xl font-bold text-slate-900">Progress</h1>
             <p className="mt-2 text-slate-600">
-              Your progress is calculated from the last <span className="font-semibold">20</span> practice attempts per
-              lesson.
+              Grades use your last <span className="font-semibold">20</span> practice attempts per lesson.
             </p>
           </div>
 
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-700">
-            <span className="font-semibold text-slate-900">Last updated:</span>{" "}
-            {progress.updatedAt ? new Date(progress.updatedAt).toLocaleString() : "—"}
+          <div className="flex flex-col gap-2 md:items-end">
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-700">
+              <span className="font-semibold text-slate-900">Last updated:</span> {lastUpdated}
+            </div>
+            <div className="text-xs text-slate-500">
+              Unstarted lessons/units/strands count as <span className="font-semibold">0%</span> in roll‑ups.
+            </div>
           </div>
         </div>
       </div>
 
-      {!hasAnyProgress ? (
+      {/* Empty state */}
+      {empty && (
         <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
           <div className="text-sm font-semibold text-slate-900">No progress yet</div>
           <p className="mt-2 text-sm text-slate-600">
-            Start practicing lessons, and we’ll show your grades here by grade → strand → unit → lesson.
+            Once you start practicing lessons, your dashboard will show strand, unit, and lesson grades here.
           </p>
-          <div className="mt-4">
-            <Link
-              href="/dashboard/lessons"
-              className="inline-flex items-center justify-center rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white hover:bg-slate-800"
-            >
-              Go to Lessons
-            </Link>
+          <div className="mt-4 rounded-2xl bg-slate-50 p-4 text-sm text-slate-700">
+            Tip: do a quick practice set in any lesson to initialize your grades.
           </div>
         </div>
-      ) : (
+      )}
+
+      {/* Grades */}
+      {!empty && (
         <div className="grid gap-6">
-          {rows.map((g) => (
-            <div key={g.grade.grade} className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="text-lg font-semibold text-slate-900">{g.grade.label}</div>
-                  <span
-                    className={
-                      "inline-flex items-center rounded-full border px-3 py-1 text-sm font-semibold " +
-                      percentBadgeClass(g.gradePct)
-                    }
-                  >
-                    {g.gradePct}%
-                  </span>
+          {gradeStats.map((g) => {
+            return (
+              <div key={g.grade.grade} className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="text-lg font-bold text-slate-900">{g.grade.label}</div>
+                    <span className={`inline-flex items-center rounded-full px-3 py-1 text-sm font-semibold ${scoreChipClass(g.gradePct)}`}
+                    >
+                      {clampPct(g.gradePct)}%
+                    </span>
+                  </div>
+                  <div className="text-sm text-slate-600">
+                    {g.startedStrands}/{g.totalStrands} strands started
+                  </div>
                 </div>
-                <div className="text-sm text-slate-600">
-                  {g.activeStrands.length} strand{g.activeStrands.length === 1 ? "" : "s"} in progress
-                </div>
-              </div>
 
-              <div className="mt-5 grid gap-4">
-                {g.activeStrands.map((s) => (
-                  <details
-                    key={s.strand}
-                    className="rounded-2xl border border-slate-200 bg-slate-50 p-4 open:bg-white"
-                    open
-                  >
-                    <summary className="cursor-pointer list-none select-none">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="flex items-center gap-3">
-                          <div className="font-semibold text-slate-900">{s.strand}</div>
-                          <span
-                            className={
-                              "inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold " +
-                              percentBadgeClass(s.strandPct)
+                <div className="mt-4">
+                  <ProgressBar pct={g.gradePct} />
+                </div>
+
+                {/* Strand cards */}
+                <div className="mt-6 grid gap-3 md:grid-cols-2">
+                  {g.strands
+                    .filter((s) => s.hasActivity)
+                    .map((s) => {
+                      const strandKey = `${g.grade.grade}::${s.strand}`;
+                      const open = !!openStrands[strandKey];
+
+                      return (
+                        <div
+                          key={strandKey}
+                          className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"
+                        >
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setOpenStrands((prev) => ({ ...prev, [strandKey]: !prev[strandKey] }))
                             }
+                            className="flex w-full items-start justify-between gap-4 text-left"
+                            aria-expanded={open}
                           >
-                            {s.strandPct}%
-                          </span>
-                        </div>
-                        <div className="text-xs text-slate-500">Click to collapse</div>
-                      </div>
-                    </summary>
+                            <div className="min-w-0">
+                              <div className="truncate text-sm font-semibold text-slate-900">{s.strand}</div>
+                              <div className="mt-1 text-xs text-slate-600">
+                                {s.startedUnits}/{s.totalUnits} units started
+                              </div>
+                            </div>
 
-                    <div className="mt-4 grid gap-3">
-                      {s.activeUnits.map((u) => (
-                        <div key={u.unit.id} className="rounded-2xl border border-slate-200 bg-white p-4">
-                          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                             <div className="flex items-center gap-3">
-                              <div className="font-semibold text-slate-900">{u.unit.title}</div>
                               <span
-                                className={
-                                  "inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold " +
-                                  percentBadgeClass(u.unitPct)
-                                }
+                                className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${scoreChipClass(s.strandPct)}`}
                               >
-                                {u.unitPct}%
+                                {clampPct(s.strandPct)}%
                               </span>
+                              <span className="text-xs text-slate-500">{open ? "Hide" : "Details"}</span>
                             </div>
-                            <div className="text-xs text-slate-500">
-                              Unit grade is the average of <span className="font-semibold">all</span> lessons in this unit
-                              (unstarted lessons count as 0%).
-                            </div>
+                          </button>
+
+                          <div className="mt-3">
+                            <ProgressBar pct={s.strandPct} />
                           </div>
 
-                          <div className="mt-3 overflow-hidden rounded-xl border border-slate-200">
-                            <div className="max-h-[320px] overflow-auto">
-                              <table className="w-full text-left text-sm">
-                                <thead className="sticky top-0 bg-slate-50 text-xs text-slate-600">
-                                  <tr>
-                                    <th className="px-3 py-2 font-semibold">Lesson</th>
-                                    <th className="px-3 py-2 text-right font-semibold">Grade</th>
-                                  </tr>
-                                </thead>
-                                <tbody className="divide-y divide-slate-200">
-                                  {u.activeLessons.map((lr) => (
-                                    <tr key={lr.lesson.id} className="bg-white">
-                                      <td className="px-3 py-2 text-slate-900">{lr.lesson.title}</td>
-                                      <td className="px-3 py-2 text-right">
-                                        <span
-                                          className={
-                                            "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold " +
-                                            percentBadgeClass(lr.pct)
-                                          }
-                                        >
-                                          {lr.pct}%
-                                        </span>
-                                      </td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
+                          {open && (
+                            <div className="mt-4 grid gap-3">
+                              {s.units
+                                .filter((u) => u.hasActivity)
+                                .sort((a, b) => a.unit.id.localeCompare(b.unit.id))
+                                .map((u) => {
+                                  const code = unitCode(u.unit.id);
+                                  const title = stripLeadingUnitCode(u.unit.title, code);
+                                  const unitOpen = !!openUnits[u.unit.id];
+
+                                  return (
+                                    <div
+                                      key={u.unit.id}
+                                      className="rounded-2xl border border-slate-200 bg-slate-50 p-4"
+                                    >
+                                      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                                        <div className="min-w-0">
+                                          <div className="flex items-center gap-2">
+                                            <span className="rounded-lg bg-white px-2 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
+                                              {code}
+                                            </span>
+                                            <div className="truncate text-sm font-semibold text-slate-900">
+                                              {title}
+                                            </div>
+                                          </div>
+                                          <div className="mt-1 text-xs text-slate-600">
+                                            {u.startedLessons}/{u.unit.lessons.length} lessons started
+                                          </div>
+                                        </div>
+
+                                        <div className="flex items-center gap-3">
+                                          <span
+                                            className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${scoreChipClass(u.unitPct)}`}
+                                          >
+                                            {clampPct(u.unitPct)}%
+                                          </span>
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              setOpenUnits((prev) => ({ ...prev, [u.unit.id]: !prev[u.unit.id] }))
+                                            }
+                                            className="text-xs font-semibold text-slate-700 hover:text-slate-900"
+                                          >
+                                            {unitOpen ? "Hide lessons" : "Show lessons"}
+                                          </button>
+                                        </div>
+                                      </div>
+
+                                      <div className="mt-3">
+                                        <ProgressBar pct={u.unitPct} />
+                                      </div>
+
+                                      {unitOpen && (
+                                        <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200 bg-white">
+                                          <div className="grid grid-cols-12 border-b border-slate-200 bg-slate-50 px-4 py-2 text-xs font-semibold text-slate-700">
+                                            <div className="col-span-9">Lesson</div>
+                                            <div className="col-span-3 text-right">Grade</div>
+                                          </div>
+
+                                          <div className="divide-y divide-slate-200">
+                                            {u.unit.lessons
+                                              .map((l) => ({
+                                                id: l.id,
+                                                title: l.title,
+                                                pct: lessonPctById[l.id] ?? null,
+                                              }))
+                                              .filter((l) => l.pct !== null)
+                                              .map((l) => (
+                                                <div
+                                                  key={l.id}
+                                                  className="grid grid-cols-12 items-center gap-2 px-4 py-3"
+                                                >
+                                                  <div className="col-span-9 min-w-0 truncate text-sm text-slate-900">
+                                                    {l.title}
+                                                  </div>
+                                                  <div className="col-span-3 flex justify-end">
+                                                    <span
+                                                      className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${scoreChipClass(l.pct ?? 0)}`}
+                                                    >
+                                                      {clampPct(l.pct ?? 0)}%
+                                                    </span>
+                                                  </div>
+                                                </div>
+                                              ))}
+                                          </div>
+
+                                          <div className="border-t border-slate-200 bg-slate-50 px-4 py-2 text-xs text-slate-600">
+                                            Unit grade includes all lessons (unstarted lessons count as 0%).
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+
+                              <div className="text-xs text-slate-600">
+                                Strand grade averages all units in this strand (unstarted units count as 0%).
+                              </div>
                             </div>
-                          </div>
+                          )}
                         </div>
-                      ))}
-                    </div>
-                  </details>
-                ))}
+                      );
+                    })}
+                </div>
+
+                <div className="mt-5 text-xs text-slate-600">
+                  Grade grade averages all strands in this grade (unstarted strands count as 0%).
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
