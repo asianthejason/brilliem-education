@@ -105,94 +105,7 @@ function SectionHeading({
 }) {
   return (
     <div className="mx-auto max-w-2xl text-center">
-      <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700">
-        <span className="inline-flex gap-1.5">
-          <ColorDot className="from-emerald-500 to-green-500" />
-          <ColorDot className="from-sky-500 to-blue-600" />
-          <ColorDot className="from-purple-500 to-fuchsia-600" />
-          <ColorDot className="from-orange-500 to-pink-500" />
-          <ColorDot className="from-red-500 to-rose-600" />
-        </span>
-        <span>{eyebrow}</span>
-      </div>
-      <h2 className="mt-4 text-3xl font-bold tracking-tight text-slate-900 md:text-4xl">
-        {title}
-      </h2>
-      <p className="mt-3 text-base text-slate-600">{subtitle}</p>
-    </div>
-  );
-}
-
-function PersonaCard({
-  title,
-  subtitle,
-  bullets,
-  accent,
-  label,
-}: {
-  title: string;
-  subtitle: string;
-  bullets: string[];
-  accent: string;
-  label: string;
-}) {
-  return (
-    <div className="group relative overflow-hidden rounded-3xl border border-slate-200 bg-white p-7 shadow-sm transition hover:-translate-y-[1px] hover:shadow-md">
-      <div
-        className={`absolute -right-24 -top-24 h-64 w-64 rounded-full bg-gradient-to-br ${accent} opacity-15 blur-3xl transition group-hover:opacity-25`}
-        aria-hidden="true"
-      />
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <div className="text-lg font-bold text-slate-900">{title}</div>
-          <div className="mt-1 text-sm text-slate-600">{subtitle}</div>
-        </div>
-        <span
-          className={`shrink-0 rounded-full bg-gradient-to-r ${accent} px-3 py-1 text-xs font-semibold text-white`}
-        >
-          {label}
-        </span>
-      </div>
-      <ul className="mt-5 grid gap-2 text-sm text-slate-700">
-        {bullets.map((b, i) => (
-          <li key={i} className="flex gap-2">
-            <span
-              className={`mt-1.5 inline-block h-2 w-2 rounded-full bg-gradient-to-r ${accent}`}
-              aria-hidden="true"
-            />
-            <span>{b}</span>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-export default function HomePage() {
-  return (
-    <main className="bg-white">
-      {/* HERO */}
-      <section className="relative overflow-hidden">
-        <div className="absolute inset-0 -z-10">
-          <div className="absolute left-1/2 top-[-180px] h-[420px] w-[900px] -translate-x-1/2 rounded-full bg-gradient-to-r from-emerald-500 via-sky-500 to-purple-600 opacity-15 blur-3xl" />
-          <div className="absolute left-[-120px] top-[240px] h-[320px] w-[320px] rounded-full bg-gradient-to-br from-orange-500 to-pink-500 opacity-12 blur-3xl" />
-          <div className="absolute right-[-140px] top-[360px] h-[360px] w-[360px] rounded-full bg-gradient-to-br from-red-500 to-rose-600 opacity-10 blur-3xl" />
-        </div>
-
-        <div className="w-full border-b border-slate-200/60 bg-white/60 backdrop-blur">
-          <div className="mx-auto max-w-6xl px-4 py-16 md:py-24">
-            <div className="grid items-center gap-10 md:grid-cols-2">
-            <div>
-              <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700">
-                <span className="inline-flex gap-1.5">
-                  <ColorDot className="from-emerald-500 to-green-500" />
-                  <ColorDot className="from-sky-500 to-blue-600" />
-                  <ColorDot className="from-purple-500 to-fuchsia-600" />
-                </span>
-                Alberta Math curriculum • Skills → Units → Grades
-              </div>
-
-              <h1 className="mt-5 text-4xl font-bold tracking-tight text-slate-900 md:text-5xl">
+<h1 className="mt-5 text-4xl font-bold tracking-tight text-slate-900 md:text-5xl">
                 Ace Alberta Math
                 <span className="mt-2 block text-xl font-semibold tracking-normal text-slate-700 md:text-2xl">
                   Clear lessons | Unlimited practices | Real progress
@@ -240,97 +153,97 @@ export default function HomePage() {
               </div>
             </div>
 
-            {/* Right hero card */}
+            
+
+
+            {/* Right hero content */}
             <div className="relative">
-              <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
+              <div className="grid gap-3">
+                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                  <div className="flex items-center justify-between">
                     <div className="text-sm font-semibold text-slate-900">
-                      What a student does in 15 minutes
+                      Watch a micro-lesson
                     </div>
-                    <div className="mt-1 text-sm text-slate-600">
-                      Learn → Practice → Fix mistakes → Move on confidently
-                    </div>
+                    <span className="text-xs font-semibold text-slate-500">
+                      6–9 min
+                    </span>
                   </div>
-                  <div className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-700">
-                    Grade 7 example
+                  <div className="mt-2 h-2 w-full rounded-full bg-slate-100">
+                    <div className="h-2 w-2/3 rounded-full bg-gradient-to-r from-sky-500 to-blue-600" />
+                  </div>
+                  <div className="mt-3 text-xs text-slate-600">
+                    Chapters: rule • examples • common mistakes
                   </div>
                 </div>
 
-                <div className="mt-6 grid gap-3">
-                  <div className="rounded-2xl border border-slate-200 p-4">
-                    <div className="flex items-center justify-between">
-                      <div className="text-sm font-semibold text-slate-900">
-                        1) Watch a micro-lesson
-                      </div>
-                      <span className="text-xs font-semibold text-slate-500">
-                        6–9 min
-                      </span>
+                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-semibold text-slate-900">
+                      Unlimited practice questions
                     </div>
-                    <div className="mt-2 h-2 w-full rounded-full bg-slate-100">
-                      <div className="h-2 w-2/3 rounded-full bg-gradient-to-r from-sky-500 to-blue-600" />
-                    </div>
-                    <div className="mt-3 text-xs text-slate-600">
-                      Chapters: rule • examples • common mistakes
-                    </div>
+                    <span className="rounded-full bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-700">
+                      explanations included
+                    </span>
                   </div>
-
-                  <div className="rounded-2xl border border-slate-200 p-4">
-                    <div className="flex items-center justify-between">
-                      <div className="text-sm font-semibold text-slate-900">
-                        2) Practice (unlimited)
+                  <div className="mt-3 grid gap-2">
+                    {[
+                      "Try it: divisible by 2, 5, or 10?",
+                      "Fix this mistake: 420 ÷ 5",
+                      "Challenge: quick tests mixed",
+                    ].map((q, idx) => (
+                      <div
+                        key={idx}
+                        className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2"
+                      >
+                        <span className="text-xs text-slate-700">{q}</span>
+                        <span className="text-[11px] font-semibold text-slate-600">
+                          Show steps →
+                        </span>
                       </div>
-                      <span className="rounded-full bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-700">
-                        explanations included
-                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-semibold text-slate-900">
+                      Readiness check
                     </div>
-                    <div className="mt-3 grid gap-2">
-                      {[
-                        "Try it: divisible by 2, 5, or 10?",
-                        "Fix this mistake: 420 ÷ 5",
-                        "Challenge: quick tests mixed",
-                      ].map((q, idx) => (
-                        <div
-                          key={idx}
-                          className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2"
+                    <span className="rounded-full bg-gradient-to-r from-emerald-500 to-green-500 px-2 py-1 text-[11px] font-semibold text-white">
+                      ready / not yet
+                    </span>
+                  </div>
+                  <p className="mt-2 text-xs text-slate-600">
+                    Progress shows exactly what to review next — with clear lesson
+                    grades.
+                  </p>
+
+                  <div className="mt-3 grid gap-2">
+                    {[
+                      { name: "Divisible by 2, 5, 10", pct: 78 },
+                      { name: "Divisibility by 3 & 9", pct: 52 },
+                      { name: "Prime factors", pct: 0 },
+                    ].map((item) => (
+                      <div
+                        key={item.name}
+                        className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2"
+                      >
+                        <span className="text-xs font-medium text-slate-800">
+                          {item.name}
+                        </span>
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                            item.pct >= 70
+                              ? "bg-emerald-50 text-emerald-700"
+                              : item.pct > 0
+                              ? "bg-amber-50 text-amber-700"
+                              : "bg-slate-100 text-slate-600"
+                          }`}
                         >
-                          <span className="text-xs text-slate-700">{q}</span>
-                          <span className="text-[11px] font-semibold text-slate-600">
-                            Show steps →
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="rounded-2xl border border-slate-200 p-4">
-                    <div className="flex items-center justify-between">
-                      <div className="text-sm font-semibold text-slate-900">
-                        3) Readiness check
+                          {item.pct}%
+                        </span>
                       </div>
-                      <span className="rounded-full bg-gradient-to-r from-emerald-500 to-green-500 px-2 py-1 text-[11px] font-semibold text-white">
-                        ready soon
-                      </span>
-                    </div>
-                    <p className="mt-2 text-xs text-slate-600">
-                      Progress highlights what to review — then unlocks unit tests
-                      when you’re ready.
-                    </p>
-                  </div>
-
-                  <div className="rounded-2xl border border-slate-200 p-4">
-                    <div className="flex items-center justify-between">
-                      <div className="text-sm font-semibold text-slate-900">
-                        Instant homework help
-                      </div>
-                      <span className="rounded-full bg-gradient-to-r from-purple-500 to-fuchsia-600 px-2 py-1 text-[11px] font-semibold text-white">
-                        AI tutor
-                      </span>
-                    </div>
-                    <p className="mt-2 text-xs text-slate-600">
-                      Type a question or upload a photo. Get one step at a time —
-                      with hints and checks along the way.
-                    </p>
+                    ))}
                   </div>
                 </div>
               </div>
@@ -361,6 +274,7 @@ export default function HomePage() {
                 </div>
               </div>
             </div>
+
           </div>
           </div>
         </div>
