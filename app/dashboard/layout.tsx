@@ -22,6 +22,14 @@ function Tab({
 }) {
   const allowedWhenLocked = new Set(["/dashboard", "/dashboard/subscription"]);
 
+  // Color accents for key destinations
+  const themedClass =
+    href === "/dashboard/lessons"
+      ? "border-emerald-200 bg-gradient-to-br from-emerald-50 to-lime-50 text-emerald-900 hover:bg-emerald-100"
+      : href === "/dashboard/ai-tutor"
+        ? "border-sky-200 bg-gradient-to-br from-sky-50 to-indigo-50 text-sky-900 hover:bg-sky-100"
+        : "border-slate-200 bg-white text-slate-800 hover:bg-slate-50";
+
   if (locked && !allowedWhenLocked.has(href)) {
     return (
       <span
@@ -36,7 +44,7 @@ function Tab({
   return (
     <Link
       href={href}
-      className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50"
+      className={`rounded-full border px-4 py-2 text-sm font-semibold transition-colors ${themedClass}`}
     >
       {label}
     </Link>
