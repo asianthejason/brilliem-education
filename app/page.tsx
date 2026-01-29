@@ -147,7 +147,7 @@ export default function HomePage() {
               </div>
 
               <p className="mt-5 max-w-xl text-lg leading-relaxed text-slate-600">
-                Brilliem gives Alberta-aligned lesson videos for every skill, unit, and
+                StemX Academy gives Alberta-aligned lesson videos for every skill, unit, and
                 grade — plus unlimited practice with explanations, progress tracking,
                 unit tests, PAT/Diploma-style prep, and an AI tutor that teaches{" "}
                 <span className="font-semibold text-slate-800">one step at a time</span>{" "}
@@ -305,7 +305,7 @@ export default function HomePage() {
       <section className="border-t border-slate-200 bg-white">
         <div className="mx-auto max-w-6xl px-4 py-16">
           <SectionHeading
-            eyebrow="Why Brilliem"
+            eyebrow="Why StemX Academy"
             title="The common problems — solved with a simple loop"
             subtitle="Most students don’t need more hours. They need clearer explanations, targeted practice, and help at the exact moment they’re stuck."
           />
@@ -464,7 +464,7 @@ export default function HomePage() {
                   href="/get-started"
                   className="inline-flex w-full items-center justify-center rounded-full bg-slate-900 px-6 py-3 text-sm font-semibold text-white hover:bg-slate-800 md:w-auto"
                 >
-                  Start exploring Brilliem
+                  Start exploring StemX Academy
                 </Link>
                 <p className="mt-3 text-xs text-slate-500">
                   (Signup flow can be added next.)
@@ -539,7 +539,7 @@ export default function HomePage() {
                 accent: "from-emerald-500 to-green-500",
               },
               {
-                q: "How is Brilliem different from random worksheets?",
+                q: "How is StemX Academy different from random worksheets?",
                 a: "Each question is tied to the exact part of the lesson that teaches it. Students don’t waste time searching for help.",
                 accent: "from-sky-500 to-blue-600",
               },
@@ -574,7 +574,7 @@ export default function HomePage() {
               Ready to build confidence in math?
             </h3>
             <p className="mx-auto mt-3 max-w-2xl text-base text-slate-600">
-              Brilliem Education helps students learn faster with clear lessons,
+              StemX Academy helps students learn faster with clear lessons,
               targeted practice, and instant support — all in one place.
             </p>
             <div className="mt-7 flex flex-wrap justify-center gap-3">

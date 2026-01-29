@@ -13,8 +13,8 @@ function Brand() {
         <span className="text-sm font-bold">B</span>
       </div>
       <div className="leading-tight">
-        <div className="text-sm font-semibold tracking-tight">Brilliem</div>
-        <div className="text-xs text-slate-500">Education</div>
+        <div className="text-sm font-semibold tracking-tight">StemX</div>
+        <div className="text-xs text-slate-500">Academy</div>
       </div>
     </div>
   );

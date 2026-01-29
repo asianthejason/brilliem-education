@@ -299,9 +299,12 @@ export default function SubscriptionPage() {
     const siId = params.get("setup_intent") || params.get("si");
     if (!setupReturn || !siId) return;
 
-    const key = `brilliem_setup_return_${siId}`;
-    if (sessionStorage.getItem(key)) return;
+    const key = `stemx_setup_return_${siId}`;
+    const legacyKey = `brilliem_setup_return_${siId}`;
+    if (sessionStorage.getItem(key) || sessionStorage.getItem(legacyKey)) return;
     sessionStorage.setItem(key, "1");
+    sessionStorage.setItem(legacyKey, "1");
+    sessionStorage.setItem(legacyKey, "1");
 
     (async () => {
       try {
@@ -645,9 +648,12 @@ export default function SubscriptionPage() {
     const t = params.get("tier") as PaidTier | null;
     if (!paymentReturn || !sid || !t) return;
 
-    const key = `brilliem_payment_return_${sid}`;
-    if (sessionStorage.getItem(key)) return;
+    const key = `stemx_payment_return_${sid}`;
+    const legacyKey = `brilliem_payment_return_${sid}`;
+    if (sessionStorage.getItem(key) || sessionStorage.getItem(legacyKey)) return;
     sessionStorage.setItem(key, "1");
+    sessionStorage.setItem(legacyKey, "1");
+    sessionStorage.setItem(legacyKey, "1");
 
     (async () => {
       try {

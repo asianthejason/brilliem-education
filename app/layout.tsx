@@ -4,7 +4,7 @@ import { ClerkProvider } from "@clerk/nextjs";
 import { SiteHeader } from "@/components/SiteHeader";
 
 export const metadata: Metadata = {
-  title: "Brilliem Education",
+  title: "StemX Academy",
   description:
     "Alberta-aligned learning with clear video lessons, smart practice, and instant help.",
 };
@@ -16,8 +16,8 @@ function BrandFooter() {
         <span className="text-sm font-bold">B</span>
       </div>
       <div className="leading-tight">
-        <div className="text-sm font-semibold tracking-tight">Brilliem</div>
-        <div className="text-xs text-slate-500">Education</div>
+        <div className="text-sm font-semibold tracking-tight">StemX</div>
+        <div className="text-xs text-slate-500">Academy</div>
       </div>
     </div>
   );
@@ -110,7 +110,7 @@ export default function RootLayout({
               </div>
 
               <div className="mt-10 flex flex-col gap-2 border-t border-slate-200 pt-6 text-xs text-slate-500 md:flex-row md:items-center md:justify-between">
-                <span>© {new Date().getFullYear()} Brilliem Education.</span>
+                <span>© {new Date().getFullYear()} StemX Academy.</span>
                 <span>Made in Canada.</span>
               </div>
             </div>

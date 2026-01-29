@@ -301,7 +301,7 @@ export async function POST(req: Request) {
         : "(none)");
 
     const systemPrompt =
-      `You are Brilliem AI Tutor. You ONLY help with Math or Science homework.
+      `You are StemX Academy AI Tutor. You ONLY help with Math or Science homework.
 ` +
       `Science includes physics, chemistry, biology, earth/space science, and science/technology history when it is relevant to a science class (discoveries, inventions, experiments, scientific devices).
 ` +
@@ -396,7 +396,7 @@ export async function POST(req: Request) {
     const out = await callOpenAIJson({
       model,
       messages,
-      schemaName: "brilliem_stem_tutor",
+      schemaName: "stemx_stem_tutor",
       schema,
       maxTokens: 1100,
     });

@@ -208,7 +208,8 @@ function makeNewChat(): ChatSession {
 }
 
 // Reuse the same storage key, but be backward compatible with older shapes.
-const STORAGE_KEY = "brilliem_ai_tutor_chats_v2";
+const STORAGE_KEY = "stemx_ai_tutor_chats_v2";
+const LEGACY_STORAGE_KEY = "brilliem_ai_tutor_chats_v2";
 
 function normalizeLoadedChats(raw: any): ChatSession[] | null {
   if (!Array.isArray(raw) || raw.length === 0) return null;
@@ -321,7 +322,8 @@ export function AiTutorClient() {
   // Load chats from localStorage
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
+      let raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) raw = localStorage.getItem(LEGACY_STORAGE_KEY);
       if (!raw) {
         const first = makeNewChat();
         setChats([first]);
@@ -348,6 +350,8 @@ export function AiTutorClient() {
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(chats));
+      // Keep legacy key in sync for backward compatibility
+      localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(chats));
     } catch {
       // ignore
     }

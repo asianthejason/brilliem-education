@@ -83,7 +83,7 @@ export function AuthModal({
           <div>
             <div className="text-base font-semibold text-slate-900">Sign in</div>
             <div className="text-sm text-slate-600">
-              Continue your learning in Brilliem.
+              Continue your learning in StemX Academy.
             </div>
           </div>
           <button

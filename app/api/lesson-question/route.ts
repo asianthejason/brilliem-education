@@ -142,7 +142,7 @@ export async function POST(req: Request) {
       model,
       system,
       user,
-      schemaName: "brilliem_lesson_question",
+      schemaName: "stemx_lesson_question",
       schema,
       temperature: 0.3,
     });

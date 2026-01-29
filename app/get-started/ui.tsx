@@ -148,7 +148,7 @@ export function GetStartedClient() {
         <div className="relative mx-auto max-w-5xl px-4 py-10">
           <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white/70 px-3 py-1 text-xs font-semibold text-slate-700 shadow-sm backdrop-blur">
             <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" />
-            Brilliem Education
+            StemX Academy
           </div>
           <h1 className="mt-4 text-3xl font-bold tracking-tight text-slate-900 md:text-4xl">
             Get started
